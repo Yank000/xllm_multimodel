@@ -316,12 +316,16 @@ void WorkerService::AllocateContinuousKVCache(
     key_options.max_context_len() = request->key_options().max_context_len();
     key_options.max_seqs_per_batch() =
         request->key_options().max_seqs_per_batch();
+    key_options.block_size() = request->key_options().block_size();
+    key_options.n_blocks() = request->key_options().n_blocks();
     value_options.num_kv_heads() = request->value_options().num_kv_heads();
     value_options.head_size() = request->value_options().head_size();
     value_options.max_context_len() =
         request->value_options().max_context_len();
     value_options.max_seqs_per_batch() =
         request->value_options().max_seqs_per_batch();
+    value_options.block_size() = request->value_options().block_size();
+    value_options.n_blocks() = request->value_options().n_blocks();
     std::vector<XTensor::Options> options_vec;
     options_vec.emplace_back(std::move(key_options));
     options_vec.emplace_back(std::move(value_options));

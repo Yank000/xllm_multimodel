@@ -51,7 +51,7 @@ class LLMEngine : public Engine {
 
   ForwardOutput step(std::vector<Batch>& batch) override;
 
-  const runtime::Options& options() const { return options_; }
+  const runtime::Options& options() const override { return options_; }
 
   bool init() override;
 
@@ -59,6 +59,12 @@ class LLMEngine : public Engine {
 
   // return the active activation memory
   std::vector<int64_t> get_active_activation_memory() const override;
+
+  void set_multi_model_page_pools(
+      std::unordered_map<torch::Device, std::shared_ptr<MultiModelPagePool>>
+          multi_model_page_pools) override;
+
+  void set_model_idx(int32_t model_idx) override;
 
   // P/D
   bool pull_kv_blocks(const int32_t src_dp_size,
@@ -177,6 +183,11 @@ class LLMEngine : public Engine {
 
   // threadpool for link cluster
   std::unique_ptr<ThreadPool> link_threadpool_;
+
+  std::unordered_map<torch::Device, std::shared_ptr<MultiModelPagePool>>
+      multi_model_page_pools_ = {};
+
+  int32_t model_idx_ = 0;
 };
 
 }  // namespace xllm

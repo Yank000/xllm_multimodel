@@ -98,6 +98,10 @@ bool CommChannel::allocate_continuous_kv_cache(
       options[0].max_context_len());
   xtensor_options_vec.mutable_key_options()->set_max_seqs_per_batch(
       options[0].max_seqs_per_batch());
+  xtensor_options_vec.mutable_key_options()->set_block_size(
+      options[0].block_size());
+  xtensor_options_vec.mutable_key_options()->set_n_blocks(
+      options[0].n_blocks());
   xtensor_options_vec.mutable_value_options()->set_num_kv_heads(
       options[1].num_kv_heads());
   xtensor_options_vec.mutable_value_options()->set_head_size(
@@ -106,6 +110,10 @@ bool CommChannel::allocate_continuous_kv_cache(
       options[1].max_context_len());
   xtensor_options_vec.mutable_value_options()->set_max_seqs_per_batch(
       options[1].max_seqs_per_batch());
+  xtensor_options_vec.mutable_value_options()->set_block_size(
+      options[1].block_size());
+  xtensor_options_vec.mutable_value_options()->set_n_blocks(
+      options[1].n_blocks());
 
   proto::Status s;
   brpc::Controller cntl;

@@ -143,7 +143,8 @@ atb::Tensor NpuBaseLayer::XTensor2Tensor(
   tensor.deviceData = xtensor->get_base_ptr();
 
   tensor.desc.shape.dimNum = 4;
-  tensor.desc.shape.dims[0] = 0;
+  tensor.desc.shape.dims[0] = xtensor->options().n_blocks();
+  // TODO:distinguish continuous kvcache from multimodel
   tensor.desc.shape.dims[1] = 128;  // block_size
   tensor.desc.shape.dims[2] =
       xtensor->options().num_kv_heads();                       // num_kv_heads
@@ -156,7 +157,9 @@ atb::Tensor NpuBaseLayer::XTensor2Tensor(
     LOG(FATAL) << "XTensor2Tensor: not support dtype: " << xtensor->dtype();
   }
 
-  tensor.dataSize = 0;
+  tensor.dataSize = xtensor->options().n_blocks() * 128 *
+                    xtensor->options().num_kv_heads() *
+                    xtensor->options().head_size() * 2;
 
   return tensor;
 }

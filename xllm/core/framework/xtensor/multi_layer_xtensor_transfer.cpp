@@ -46,8 +46,13 @@ MultiLayerXTensorPair MultiLayerXTensorTransfer::move_multi_layer_xtensor(
   CHECK(v_it != multi_layer_v_xtensor_map_.end())
       << "MultiLayerXTensor not set for device " << device_id;
 
+  // 先保存数据，再删除迭代器，避免使用失效的迭代器
+  MultiLayerXTensorPair result =
+      std::make_pair(std::move(k_it->second), std::move(v_it->second));
+
   multi_layer_k_xtensor_map_.erase(k_it);
   multi_layer_v_xtensor_map_.erase(v_it);
-  return std::make_pair(std::move(k_it->second), std::move(v_it->second));
+
+  return result;
 }
 }  // namespace xllm

@@ -34,6 +34,7 @@ limitations under the License.
 #include "framework/prefix_cache/prefix_cache.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
+#include "multimodel_page_pool.h"
 #include "scheduler/decode_priority_queue.h"
 #include "util/timer.h"
 
@@ -41,12 +42,19 @@ namespace xllm {
 // class DecodePriorityQueue;
 class BlockManager {
  public:
+  using DevicePoolMap =
+      std::unordered_map<torch::Device, std::shared_ptr<MultiModelPagePool>>;
   struct Options {
     PROPERTY(uint32_t, num_blocks) = 0;
     PROPERTY(int32_t, block_size) = 0;
     PROPERTY(bool, enable_prefix_cache) = true;
     PROPERTY(bool, enable_disagg_pd) = false;
     PROPERTY(bool, enable_cache_upload) = false;
+    PROPERTY(DevicePoolMap, multi_model_page_pools) = {};
+    PROPERTY(int64_t, slot_size) = 0;
+    PROPERTY(int32_t, init_pages) = 0;
+    PROPERTY(std::vector<torch::Device>, devices) = {};
+    PROPERTY(int32_t, model_idx) = 0;
   };
 
   explicit BlockManager(Options options) : options_(options) {}

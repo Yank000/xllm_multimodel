@@ -570,10 +570,17 @@ void NpuQwen3DecoderLayerImpl::build_node_variant_pack(
       atb_speed::Utils::AtTensor2Tensor(sin_pos);
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 3) =
       atb_speed::Utils::AtTensor2Tensor(attn_mask);
-  node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 4) =
-      atb_speed::Utils::AtTensor2Tensor(kv_cache.get_k_cache());
-  node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 5) =
-      atb_speed::Utils::AtTensor2Tensor(kv_cache.get_v_cache());
+  if (0) {  // TODO:refactor judgement
+    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 4) =
+        atb_speed::Utils::AtTensor2Tensor(kv_cache.get_k_cache());
+    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 5) =
+        atb_speed::Utils::AtTensor2Tensor(kv_cache.get_v_cache());
+  } else {
+    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 4) =
+        XTensor2Tensor(kv_cache.get_k_xtensor());
+    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 5) =
+        XTensor2Tensor(kv_cache.get_v_xtensor());
+  }
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 6) =
       atb_speed::Utils::AtTensor2Tensor(input_params.kv_seq_lens);
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 6).hostData =

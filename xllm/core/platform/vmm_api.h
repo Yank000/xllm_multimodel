@@ -56,5 +56,10 @@ void map(VirPtr& vir_ptr, PhyMemHandle& phy_mem_handle);
 // unmap a virtual memory pointer with a specific aligned size
 void unmap(VirPtr& vir_ptr, size_t aligned_size);
 
+// create a physical memory handle for a specific device
+void create_phy_mem_handle(PhyMemHandle& phy_mem_handle,
+                           int32_t device_id,
+                           int32_t page_size);
+
 }  // namespace vmm
 }  // namespace xllm

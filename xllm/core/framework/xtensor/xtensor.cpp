@@ -23,6 +23,18 @@ XTensor::XTensor(const Options& options, torch::ScalarType dtype)
   cache_size_per_token_ = options_.num_kv_heads() * options_.head_size() *
                           torch::scalarTypeToTypeMeta(dtype_).itemsize();
 
+  if (options_.block_size() != 0) {  // TODO:refactor judgement
+    buffer_size_ =
+        options_.block_size() * options_.n_blocks() * cache_size_per_token_;
+    // align up to granularity size
+    int64_t granularity_size =
+        2 * 1024 * 1024;  // TODO:FLAGS_phy_page_granularity_size;
+    buffer_size_ = (buffer_size_ + granularity_size - 1) / granularity_size *
+                   granularity_size;
+
+    reserve_base_ptr();
+    return;
+  }
   buffer_size_per_seq_ = cache_size_per_token_ * options_.max_context_len();
 
   // align up to granularity size

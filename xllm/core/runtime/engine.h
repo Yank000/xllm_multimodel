@@ -22,6 +22,7 @@ limitations under the License.
 
 #include "framework/batch/batch.h"
 #include "framework/block/block_manager_pool.h"
+#include "framework/block/multimodel_page_pool.h"
 #include "framework/model/model_args.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
@@ -139,6 +140,19 @@ class Engine {
   virtual void set_avaiable_capacity(int64_t capacity) {
     free_mem_capacity_ = capacity;
   }
+  virtual void set_multi_model_page_pools(
+      std::unordered_map<torch::Device, std::shared_ptr<MultiModelPagePool>>
+          multi_model_page_pools) {
+    LOG(FATAL) << " set_multi_model_page_pools is not implemented!";
+  };
+
+  virtual void set_model_idx(int32_t model_idx) {
+    LOG(FATAL) << " set_multi_model_page_pools is not implemented!";
+  };
+
+  virtual const runtime::Options& options() const {
+    LOG(FATAL) << " options is not implemented!";
+  };
 
   struct KVCacheCapacity {
     int64_t n_blocks = 0;

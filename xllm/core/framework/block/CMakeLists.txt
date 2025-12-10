@@ -11,11 +11,21 @@ cc_library(
     block_manager_pool.h
     block_manager_impl.h
     concurrent_block_manager_impl.h
+    multimodel_block_manager_impl.h
+    multimodel_page_pool.h
+    multimodel_page.h
+    multimodel/block_multi_layer_xtensor.h
+    multimodel/block_multi_layer_xtensor_transfer.h
   SRCS 
     block.cpp
     block_manager_pool.cpp
     concurrent_block_manager_impl.cpp
     block_manager_impl.cpp
+    multimodel_block_manager_impl.cpp
+    multimodel_page_pool.cpp
+    multimodel_page.cpp
+    multimodel/block_multi_layer_xtensor.cpp
+    multimodel/block_multi_layer_xtensor_transfer.cpp
   DEPS
     $<$<BOOL:${USE_NPU}>:torch_npu>
     $<$<BOOL:${USE_NPU}>:graph>

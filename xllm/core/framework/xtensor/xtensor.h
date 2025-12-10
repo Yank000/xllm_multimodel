@@ -32,6 +32,8 @@ class XTensor final {
     PROPERTY(int64_t, head_size) = 0;
     PROPERTY(int32_t, max_context_len) = 0;
     PROPERTY(int32_t, max_seqs_per_batch) = 0;
+    PROPERTY(int64_t, n_blocks) = 0;
+    PROPERTY(int32_t, block_size) = 0;
   };
 
   XTensor(const Options& options, torch::ScalarType dtype);
@@ -52,6 +54,13 @@ class XTensor final {
   VirPtr get_vir_ptr(int32_t seq_id) const {
     CHECK(base_ptr_) << "Base pointer is not initialized";
     return reinterpret_cast<VirPtr>(base_ptr_ + seq_id * buffer_size_per_seq_);
+  }
+
+  VirPtr get_block_vir_ptr(size_t offset) const {
+    CHECK(base_ptr_) << "Base pointer is not initialized";
+    CHECK(offset + 2 * 1024 * 1024 <= buffer_size_) << buffer_size_;
+    // TODO:refactor this
+    return reinterpret_cast<VirPtr>(base_ptr_ + offset);
   }
 
   const Options& options() const { return options_; }

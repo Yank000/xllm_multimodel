@@ -58,8 +58,28 @@ void LLMMaster::init() {
   // Refactor
   engine_->set_avaiable_capacity(master_coordinator_->plan_mem());
 
+  if (master_coordinator_->get_serve_model_num() > 1) {
+    for (int i = 0; i < engine_->options().devices().size(); i++) {
+      master_coordinator_->set_multi_model_page_pool(
+          engine_->options().devices()[i]);
+    }
+    engine_->set_multi_model_page_pools(
+        master_coordinator_->get_multi_model_page_pools());
+    engine_->set_model_idx(options_.current_model_idx());
+  }
+
   CHECK(engine_->init());
   task_type_ = options_.task_type();
+
+  if (master_coordinator_->get_serve_model_num() > 1) {
+    LOG(INFO) << "Multi-model serving mode, model idx: "
+              << options_.current_model_idx() << ", serve model num: "
+              << master_coordinator_->get_serve_model_num();
+    for (int i = 0; i < engine_->options().devices().size(); i++) {
+      master_coordinator_->multi_model_page_pool_init(
+          engine_->options().devices()[i]);
+    }
+  }
 
   model_args_ = engine_->model_args();
 

@@ -37,6 +37,8 @@ message XTensorOptions {
   int64 head_size = 2;
   int32 max_context_len = 3;
   int32 max_seqs_per_batch = 4;
+  int32 block_size = 5;
+  int64 n_blocks = 6;
 }
 
 message XTensorOptionsVec{

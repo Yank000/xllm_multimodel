@@ -18,6 +18,8 @@ limitations under the License.
 #include <algorithm>
 #include <vector>
 
+#include "core/framework/block/multimodel_page_pool.h"
+
 namespace xllm {
 
 // TODO: refactor/rename
@@ -43,9 +45,47 @@ class MasterCoordinator {
     return (*min_mem / serve_model_num_);
   }
 
+  int32_t get_serve_model_num() const { return serve_model_num_; }
+
+  void set_multi_model_page_pool(torch::Device device) {
+    auto it = count_.find(device);
+    if (it != count_.end()) {
+      ++(it->second);
+    } else {
+      count_[device] = 1;
+      LOG(INFO) << "Constructing multi-model page pool for device "
+                << static_cast<int32_t>(device.index());
+      ;
+      MultiModelPagePool::Options page_pool_options;
+      page_pool_options.num_models(serve_model_num_)
+          .num_total_pages(plan_mem() * serve_model_num_ /
+                           (2 * 1024 * 1024));  // TODO:2MB page size
+      std::shared_ptr<MultiModelPagePool> multi_model_page_pool_ =
+          std::make_shared<MultiModelPagePool>(page_pool_options, device);
+      multi_model_page_pools_[device] = multi_model_page_pool_;
+    }
+  }
+
+  void multi_model_page_pool_init(torch::Device device) {
+    if (count_[device] == serve_model_num_) {
+      LOG(INFO) << "Initializing multi-model page pool for device "
+                << static_cast<int32_t>(device.index());
+      multi_model_page_pools_[device]->init();
+    }
+  }
+
+  std::unordered_map<torch::Device, std::shared_ptr<MultiModelPagePool>>
+  get_multi_model_page_pools() {
+    return multi_model_page_pools_;
+  }
+
  private:
   int32_t serve_model_num_ = 0;
   std::vector<int64_t> estimate_kv_mem;
+  // TODO: Device or Device.index() as key?
+  std::unordered_map<torch::Device, std::shared_ptr<MultiModelPagePool>>
+      multi_model_page_pools_;
+  std::unordered_map<torch::Device, int32_t> count_;
 };
 
 }  // namespace xllm

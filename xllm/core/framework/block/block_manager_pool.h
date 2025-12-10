@@ -20,11 +20,14 @@ limitations under the License.
 
 #include "block_manager.h"
 #include "framework/block/kv_cache_manager.h"
+#include "multimodel_block_manager_impl.h"
 
 namespace xllm {
 
 class BlockManagerPool final : public KVCacheManager {
  public:
+  using DevicePoolMap =
+      std::unordered_map<torch::Device, std::shared_ptr<MultiModelPagePool>>;
   struct Options {
     PROPERTY(uint32_t, num_blocks) = 0;
     PROPERTY(uint32_t, host_num_blocks) = 0;
@@ -33,6 +36,10 @@ class BlockManagerPool final : public KVCacheManager {
     PROPERTY(bool, enable_disagg_pd) = false;
     PROPERTY(bool, enable_cache_upload) = false;
     PROPERTY(bool, enable_kvcache_store) = false;
+    PROPERTY(DevicePoolMap, multi_model_page_pools) = {};
+    PROPERTY(int64_t, slot_size) = 0;
+    PROPERTY(std::vector<torch::Device>, devices) = {};
+    PROPERTY(int32_t, model_idx) = 0;
   };
 
   explicit BlockManagerPool(const Options& options, int32_t dp_size = 1);

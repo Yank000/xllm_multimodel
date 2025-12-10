@@ -36,6 +36,7 @@ limitations under the License.
 #include "common/device_monitor.h"
 #include "common/global_flags.h"
 #include "common/metrics.h"
+#include "framework/block/multimodel/block_multi_layer_xtensor_transfer.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/model_loader.h"
@@ -99,39 +100,80 @@ bool WorkerImpl::allocate_kv_cache(
   const bool enable_lighting_indexer =
       context_.get_model_args().index_n_heads() > 0;
   kv_caches_.reserve(num_layers);
-  for (int64_t i = 0; i < num_layers; ++i) {
-    torch::Tensor key_cache, value_cache, index_cache;
+  if (0) {  // TODO：Add Tensor LOGIC
+    /*    std::shared_ptr<XTensor> key_xtensor;
+        std::shared_ptr<XTensor> value_xtensor;
+
+        std::vector<std::shared_ptr<XTensor>> key_xtensors(num_layers);
+        std::vector<std::shared_ptr<XTensor>> value_xtensors(num_layers);
+
+        for (int64_t i = 0; i < num_layers; ++i) {
+          torch::Tensor key_cache, value_cache, index_cache;
+          key_xtensor = std::make_shared<XTensor>(options[0], dtype_);
+          key_xtensors[i] = key_xtensor;
+
+          value_xtensor = std::make_shared<XTensor>(options[1], dtype_);
+          value_xtensors[i] = value_xtensor;
+    #if defined(USE_NPU)
+          auto options = torch::TensorOptions()
+              .dtype(dtype_)
+              .device(device_);
+          torch::Tensor tensor = torch::from_blob(
+              reserved_ptr,
+              kv_cache_shape[0],  // 使用第一个维度的shape
+              options
+          );
+
+          // 步骤2: 应用NPU格式转换
+    (format_cast到NZ格式，参数2表示ACL_FORMAT_FRACTAL_NZ) torch::Tensor
+    key_cache = at_npu::native::npu_format_cast(tensor, 2); #endif
+          kv_caches_.emplace_back(key_xtensor, value_xtensor);
+        }
+
+        if(options[0].block_size() != 0) {
+          BlockMultiLayerXTensorTransfer::get_instance().set_multi_layer_xtensor(
+              key_xtensors, value_xtensors, device_);
+        } else {
+          MultiLayerXTensorTransfer::get_instance().set_multi_layer_xtensor(
+              key_xtensors, value_xtensors, device_);
+        }
+    */
+  } else {
+    for (int64_t i = 0; i < num_layers; ++i) {
+      torch::Tensor key_cache, value_cache, index_cache;
 #if defined(USE_NPU)
-    key_cache = at_npu::native::npu_format_cast(
-        torch::empty(kv_cache_shape[0], torch::dtype(dtype_).device(device_)),
-        2);
-    value_cache = at_npu::native::npu_format_cast(
-        torch::empty(kv_cache_shape[1], torch::dtype(dtype_).device(device_)),
-        2);
+      key_cache = at_npu::native::npu_format_cast(
+          torch::empty(kv_cache_shape[0], torch::dtype(dtype_).device(device_)),
+          2);
+      value_cache = at_npu::native::npu_format_cast(
+          torch::empty(kv_cache_shape[1], torch::dtype(dtype_).device(device_)),
+          2);
 #else
-    key_cache =
-        torch::empty(kv_cache_shape[0], torch::dtype(dtype_).device(device_));
-    if (!kv_cache_shape[1].empty()) {
-      value_cache =
-          torch::empty(kv_cache_shape[1], torch::dtype(dtype_).device(device_));
-    }
-    if (enable_lighting_indexer) {
-      index_cache =
-          torch::empty(kv_cache_shape[2], torch::dtype(dtype_).device(device_));
-    }
+      key_cache =
+          torch::empty(kv_cache_shape[0], torch::dtype(dtype_).device(device_));
+      if (!kv_cache_shape[1].empty()) {
+        value_cache = torch::empty(kv_cache_shape[1],
+                                   torch::dtype(dtype_).device(device_));
+      }
+      if (enable_lighting_indexer) {
+        index_cache = torch::empty(kv_cache_shape[2],
+                                   torch::dtype(dtype_).device(device_));
+      }
 #endif
-    kv_caches_.emplace_back(key_cache, value_cache, index_cache);
-  }
+      kv_caches_.emplace_back(key_cache, value_cache, index_cache);
+    }
 
-  key_cache_size_per_layer_ = kv_caches_[0].get_k_cache()[0].numel() *
-                              kv_caches_[0].get_k_cache()[0].element_size();
-  // make sure value cache is not empty
-  if (!kv_cache_shape[1].empty()) {
-    value_cache_size_per_layer_ = kv_caches_[0].get_v_cache()[0].numel() *
-                                  kv_caches_[0].get_v_cache()[0].element_size();
-  }
+    key_cache_size_per_layer_ = kv_caches_[0].get_k_cache()[0].numel() *
+                                kv_caches_[0].get_k_cache()[0].element_size();
+    // make sure value cache is not empty
+    if (!kv_cache_shape[1].empty()) {
+      value_cache_size_per_layer_ =
+          kv_caches_[0].get_v_cache()[0].numel() *
+          kv_caches_[0].get_v_cache()[0].element_size();
+    }
 
-  allocate_host_kv_cache(kv_cache_shape);
+    allocate_host_kv_cache(kv_cache_shape);
+  }
   status_ = Status::READY;
   return true;
 }
@@ -223,8 +265,13 @@ bool WorkerImpl::allocate_continuous_kv_cache(
     kv_caches_.emplace_back(key_xtensor, value_xtensor);
   }
 
-  MultiLayerXTensorTransfer::get_instance().set_multi_layer_xtensor(
-      key_xtensors, value_xtensors, device_);
+  if (options[0].block_size() != 0) {
+    BlockMultiLayerXTensorTransfer::get_instance().set_multi_layer_xtensor(
+        key_xtensors, value_xtensors, device_);
+  } else {
+    MultiLayerXTensorTransfer::get_instance().set_multi_layer_xtensor(
+        key_xtensors, value_xtensors, device_);
+  }
 
   status_ = Status::READY;
   return true;

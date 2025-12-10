@@ -46,11 +46,25 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
             std::make_unique<ConcurrentBlockManagerImpl>(host_options));
       }
     } else {
-      block_managers_.emplace_back(
-          std::make_unique<BlockManagerImpl>(npu_options));
-      if (options_.host_num_blocks() > 0) {
-        host_block_managers_.emplace_back(
-            std::make_unique<BlockManagerImpl>(host_options));
+      if (!options_.multi_model_page_pools().empty()) {
+        // TODO: replace MultiModelBlockManagerImpl with block_manager_client
+        // world_size
+        for (int32_t j = 0; j < options_.devices().size(); j++) {
+          npu_options.multi_model_page_pools(options_.multi_model_page_pools())
+              .slot_size(options_.slot_size())
+              .init_pages(0)  // TODO:init_pages configurable
+              .devices(options_.devices())
+              .model_idx(options_.model_idx());
+          block_managers_.emplace_back(
+              std::make_unique<MultiModelBlockManagerImpl>(npu_options));
+        }
+      } else {
+        block_managers_.emplace_back(
+            std::make_unique<BlockManagerImpl>(npu_options));
+        if (options_.host_num_blocks() > 0) {
+          host_block_managers_.emplace_back(
+              std::make_unique<BlockManagerImpl>(host_options));
+        }
       }
     }
   }

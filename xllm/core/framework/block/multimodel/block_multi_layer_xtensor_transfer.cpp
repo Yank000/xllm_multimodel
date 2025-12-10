@@ -1,0 +1,59 @@
+/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include "block_multi_layer_xtensor_transfer.h"
+
+#include "common/global_flags.h"
+
+namespace xllm {
+
+void BlockMultiLayerXTensorTransfer::initialize(
+    const std::vector<torch::Device>& devices) {
+  for (const auto& device : devices) {
+    multi_layer_k_xtensor_maps_.clear();
+    multi_layer_v_xtensor_maps_.clear();
+  }
+}
+
+void BlockMultiLayerXTensorTransfer::set_multi_layer_xtensor(
+    std::vector<std::shared_ptr<XTensor>>& k_xtensors,
+    std::vector<std::shared_ptr<XTensor>>& v_xtensors,
+    torch::Device device) {
+  multi_layer_k_xtensor_maps_[device.index()].push_back(
+      std::move(std::make_unique<BlockMultiLayerXTensor>(k_xtensors)));
+  multi_layer_v_xtensor_maps_[device.index()].push_back(
+      std::move(std::make_unique<BlockMultiLayerXTensor>(v_xtensors)));
+}
+// TODO: distinguish multimodel/xtensor
+
+BlockMultiLayerXTensorPairs
+BlockMultiLayerXTensorTransfer::move_multi_layer_xtensors(int32_t device_id) {
+  auto k_it = multi_layer_k_xtensor_maps_.find(device_id);
+  auto v_it = multi_layer_v_xtensor_maps_.find(device_id);
+  CHECK(k_it != multi_layer_k_xtensor_maps_.end())
+      << "BlockMultiLayerXTensor not set for device " << device_id;
+  CHECK(v_it != multi_layer_v_xtensor_maps_.end())
+      << "BlockMultiLayerXTensor not set for device " << device_id;
+
+  // 先保存数据，再删除迭代器，避免使用失效的迭代器
+  BlockMultiLayerXTensorPairs result =
+      std::make_pair(std::move(k_it->second), std::move(v_it->second));
+
+  multi_layer_k_xtensor_maps_.erase(k_it);
+  multi_layer_v_xtensor_maps_.erase(v_it);
+
+  return result;
+}
+}  // namespace xllm

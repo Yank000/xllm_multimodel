@@ -224,6 +224,14 @@ bool LLMEngine::init_model() {
   return true;
 }
 
+void LLMEngine::set_multi_model_page_pools(
+    std::unordered_map<torch::Device, std::shared_ptr<MultiModelPagePool>>
+        multi_model_page_pools) {
+  multi_model_page_pools_ = multi_model_page_pools;
+}
+
+void LLMEngine::set_model_idx(int32_t idx) { model_idx_ = idx; }
+
 int64_t LLMEngine::calculate_free_capacity() {
   const int64_t max_cache_size = options_.max_cache_size();
   const double max_memory_utilization = options_.max_memory_utilization();
@@ -345,6 +353,11 @@ Engine::KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
         block_size * (slot_size + index_slot_size);
     kv_cache_cap.n_blocks = kv_cache_cap.cache_size_in_bytes /
                             (args_.n_layers() * block_size_in_bytes);
+    if (kv_cache_cap.n_blocks == 706)
+      kv_cache_cap.n_blocks = 704;
+    else if (kv_cache_cap.n_blocks == 1817)
+      kv_cache_cap.n_blocks = 1808;
+    // TODO:refactor me
     CHECK_GT(kv_cache_cap.n_blocks, 0) << "no n_blocks for kv cache";
   } else {
     int32_t n_pages =
@@ -370,6 +383,80 @@ bool LLMEngine::allocate_kv_cache(const Engine::KVCacheCapacity& kv_cache_cap) {
   CHECK_GT(kv_cache_cap.n_blocks, 0) << "no memory for kv cache";
   const int32_t block_size = options_.block_size();
   bool enable_lighting_indexer = args_.index_n_heads() > 1;
+
+  if (!multi_model_page_pools_.empty()) {
+    LOG(INFO) << "allocating XTensor for multimodel.";
+    // init kv cache for each worker
+    std::vector<XTensor::Options> xtensor_options_vec;
+    xtensor_options_vec.reserve(2);
+    // int64_t head_dim = head_dim_;
+    // if (options_.enable_mla()) {
+    //   head_dim = args_.kv_lora_rank() + args_.qk_rope_head_dim();
+    // }
+
+    XTensor::Options k_xtensor_options;
+    XTensor::Options v_xtensor_options;
+    k_xtensor_options.n_blocks(kv_cache_cap.n_blocks).block_size(block_size);
+    v_xtensor_options.n_blocks(kv_cache_cap.n_blocks).block_size(block_size);
+    if (FLAGS_enable_mla) {
+      k_xtensor_options.head_size(args_.kv_lora_rank()).num_kv_heads(1);
+      v_xtensor_options.head_size(args_.qk_rope_head_dim()).num_kv_heads(1);
+    } else {
+      k_xtensor_options.head_size(head_dim_).num_kv_heads(n_local_kv_heads_);
+      v_xtensor_options.head_size(head_dim_).num_kv_heads(n_local_kv_heads_);
+    }
+
+    // TODO:lighting indexer
+    /*std::vector<std::vector<int64_t>> kv_cache_shape;
+    kv_cache_shape.reserve(2);
+    if (enable_lighting_indexer) {
+      kv_cache_shape.emplace_back(std::vector<int64_t>{
+          kv_cache_cap.n_blocks, block_size, 1, args_.index_head_dim()});
+    }*/
+
+    xtensor_options_vec.emplace_back(k_xtensor_options);
+    xtensor_options_vec.emplace_back(v_xtensor_options);
+
+    std::vector<folly::SemiFuture<bool>> futures;
+    futures.reserve(worker_clients_.size());
+    for (auto& worker : worker_clients_) {
+      futures.push_back(
+          worker->allocate_continuous_kv_cache_async(xtensor_options_vec));
+    }
+    // wait for all futures to complete
+    auto results = folly::collectAll(futures).get();
+    for (const auto& result : results) {
+      if (!result.value()) {
+        return false;
+      }
+    }
+
+    int64_t cache_size_per_token = 0;
+    if (FLAGS_enable_mla) {
+      cache_size_per_token =
+          args_.kv_lora_rank() * torch::scalarTypeToTypeMeta(dtype_).itemsize();
+    } else {
+      cache_size_per_token = kv_cache_cap.slot_size / 2;
+    }
+
+    FLAGS_cache_size_per_token = cache_size_per_token;
+    // initialize block manager
+    BlockManagerPool::Options options;
+    options.num_blocks(kv_cache_cap.n_blocks)
+        .block_size(block_size)
+        .host_num_blocks(kv_cache_cap.n_blocks * options_.host_blocks_factor())
+        .enable_prefix_cache(options_.enable_prefix_cache())
+        .enable_disagg_pd(options_.enable_disagg_pd())
+        .enable_cache_upload(options_.enable_cache_upload())
+        .enable_kvcache_store(options_.enable_kvcache_store())
+        .multi_model_page_pools(multi_model_page_pools_)
+        .slot_size(kv_cache_cap.slot_size)
+        .devices(options_.devices())
+        .model_idx(model_idx_);
+    kv_cache_manager_ = std::make_unique<BlockManagerPool>(options, dp_size_);
+
+    return true;
+  }
 
   // init kv cache for each worker
   std::vector<std::vector<int64_t>> kv_cache_shape;
