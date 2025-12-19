@@ -45,10 +45,8 @@ class MultiModelPagePool final {
   std::vector<std::unique_ptr<MultiModelPage>> allocate(int32_t model_idx);
 
   // get back pages to phy_page_pool
-  void deallocate(std::vector<std::unique_ptr<MultiModelPage>> pages,
-                  int32_t model_idx);
+  void deallocate(std::vector<std::unique_ptr<MultiModelPage>> pages);
 
-  int32_t get_page_id(int32_t block_id, size_t block_mem_size);
   /*
     void map(VirPtr vir_ptr, PhyMemHandle phy_handle) const;
     void map(VirPtr vir_ptr, uint32_t page_id, int64_t layer_idx) const;
@@ -83,20 +81,10 @@ class MultiModelPagePool final {
   torch::Device device_;
 
   // free physical pages
-  std::vector<std::vector<std::vector<std::unique_ptr<MultiModelPage>>>>
-      free_phy_pages_;  // [num_models, num_layers, num_pages]
+  std::vector<std::unique_ptr<MultiModelPage>> free_phy_pages_;  // [num_pages]
 
-  std::vector<std::atomic<uint32_t>>
-      num_free_phy_pages_;  // [num_model_block_types]
+  std::atomic<uint32_t> num_free_phy_pages_{0};
 
   size_t page_size_;
-
-  BlockMultiLayerXTensorPairs multi_layer_kv_xtensors_;
-
-  void add_multi_layer_kv_xtensors(torch::Device device_);
-
-  std::vector<int64_t> num_layers_;
-
-  void map(VirPtr vir_ptr, PhyMemHandle phy_handle) const;
 };
 }  // namespace xllm

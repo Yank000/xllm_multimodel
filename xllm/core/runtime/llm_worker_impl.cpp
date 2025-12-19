@@ -102,10 +102,8 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
 
   // temporarily use [0], will be adapted in next pr
   // call model executor forward to get hidden states
-  LOG(INFO) << "DEBUG";
   auto hidden_states = model_executor_->forward(
       input.token_ids, input.positions, kv_caches_, input.input_params);
-  LOG(INFO) << "DEBUG";
   if (!hidden_states.defined()) {
     return std::nullopt;
   }

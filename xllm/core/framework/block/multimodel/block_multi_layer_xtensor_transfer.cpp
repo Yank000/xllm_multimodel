@@ -38,8 +38,9 @@ void BlockMultiLayerXTensorTransfer::set_multi_layer_xtensor(
 }
 // TODO: distinguish multimodel/xtensor
 
-BlockMultiLayerXTensorPairs
-BlockMultiLayerXTensorTransfer::move_multi_layer_xtensors(int32_t device_id) {
+BlockMultiLayerXTensorPair
+BlockMultiLayerXTensorTransfer::move_multi_layer_xtensor(int32_t device_id,
+                                                         int32_t model_idx) {
   auto k_it = multi_layer_k_xtensor_maps_.find(device_id);
   auto v_it = multi_layer_v_xtensor_maps_.find(device_id);
   CHECK(k_it != multi_layer_k_xtensor_maps_.end())
@@ -48,11 +49,11 @@ BlockMultiLayerXTensorTransfer::move_multi_layer_xtensors(int32_t device_id) {
       << "BlockMultiLayerXTensor not set for device " << device_id;
 
   // 先保存数据，再删除迭代器，避免使用失效的迭代器
-  BlockMultiLayerXTensorPairs result =
-      std::make_pair(std::move(k_it->second), std::move(v_it->second));
+  BlockMultiLayerXTensorPair result = std::make_pair(
+      std::move(k_it->second[model_idx]), std::move(v_it->second[model_idx]));
 
-  multi_layer_k_xtensor_maps_.erase(k_it);
-  multi_layer_v_xtensor_maps_.erase(v_it);
+  // multi_layer_k_xtensor_maps_.erase(k_it);
+  // multi_layer_v_xtensor_maps_.erase(v_it);
 
   return result;
 }

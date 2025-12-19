@@ -33,18 +33,36 @@ MultiModelBlockManagerImpl::MultiModelBlockManagerImpl(const Options& options)
   // num_pages:初始化预分配的物理页数量；kv_token_size_:每个token的kv向量大小
   size_t init_pages = options_.init_pages();
   block_size_ = options_.block_size();
-  block_mem_size_ = block_size_ * options_.slot_size();
+  block_mem_size_ = block_size_ * options_.slot_size() /
+                    2;  // slot_size包含了K和V,但是单个page只存储K或V
   model_idx_ = options_.model_idx();
   page_allocator_ = options_.multi_model_page_pools()[options_.devices()[0]];
+
+  add_multi_layer_kv_xtensor(options_.devices()[0]);
+  // TODO: refactor parallel
+  int32_t page_size_ = 2 * 1024 * 1024;
+  // TODO: refactor page_size config
+  size_t max_page_num = options_.num_blocks() * block_mem_size_ / page_size_;
+
+  offsets_.reserve(max_page_num);
+
+  for (size_t i = 0; i < max_page_num; ++i) {
+    offsets_.push_back(i * page_size_);
+  }
+
+  // refactor devices
   for (int32_t i = 0; i < init_pages; ++i) {
     std::vector<std::unique_ptr<MultiModelPage>> pages =
-        page_allocator_->allocate(model_idx_);
+        page_allocator_->allocate(num_layers_ * 2);
+
     int32_t page_id = pages[0]->get_page_id();
+    size_t offset = offsets_.back();
+    offsets_.pop_back();
+
+    pages = batch_map(offset, std::move(pages));
 
     // Initialize each page and store in avail_pages_[page_id][layer_idx]
-    for (int j = 0; j < pages.size(); ++j) {
-      pages[j]->init(block_mem_size_);
-    }
+    pages[0]->init(block_mem_size_, offset);
 
     // Store the vector of pages under the page_id key
     avail_pages_[page_id] = std::move(pages);
@@ -71,10 +89,14 @@ std::vector<Block> MultiModelBlockManagerImpl::allocate(size_t num_blocks) {
     std::vector<std::unique_ptr<MultiModelPage>> pages;
 
     if (avail_pages_.empty()) {
-      pages = page_allocator_->allocate(model_idx_);
-      for (auto& page : pages) {
-        page->init(block_mem_size_);
-      }
+      pages = page_allocator_->allocate(num_layers_ * 2);
+
+      size_t offset = offsets_.back();
+      offsets_.pop_back();
+
+      pages = batch_map(offset, std::move(pages));
+      pages[0]->init(block_mem_size_, offset);
+
       num_free_blocks_.fetch_add(pages[0]->num_free_blocks(),
                                  std::memory_order_relaxed);
     } else {
@@ -93,6 +115,7 @@ std::vector<Block> MultiModelBlockManagerImpl::allocate(size_t num_blocks) {
         pages[0]->alloc(num_from_page);  // pages[0]是映射层
     for (int32_t block_id : alloced_blocks) {
       blocks.emplace_back(block_id, this);
+      page_id_[block_id] = pages[0]->get_page_id();
     }
 
     int32_t page_id = pages[0]->get_page_id();
@@ -172,33 +195,84 @@ bool MultiModelBlockManagerImpl::has_enough_blocks(uint32_t num_blocks) {
 
 // caller should make sure the block_id is valid
 void MultiModelBlockManagerImpl::free(int32_t block_id) {
-  // do nothing for reserved block 0
-  if (block_id != 0) {
-    int32_t page_id = page_allocator_->get_page_id(block_id, block_mem_size_);
-    std::vector<std::unique_ptr<MultiModelPage>> pages;
-    auto it_full = full_pages_.find(page_id);
-    if (it_full != full_pages_.end()) {  // in full pages
-      pages = std::move(it_full->second);
-      full_pages_.erase(it_full);
-    } else {
-      auto it_avail = avail_pages_.find(page_id);
-      CHECK_EQ(it_avail != avail_pages_.end(), true)
-          << "Invalid block id to free: " << block_id;
-      pages = std::move(it_avail->second);
-      avail_pages_.erase(it_avail);
-    }
-    num_free_blocks_.fetch_add(1, std::memory_order_relaxed);
-    pages[0]->free(block_id);
-
-    if (pages[0]->empty()) {
-      for (auto& page : pages) {
-        page->reset();
-      }
-      page_allocator_->deallocate(std::move(pages), model_idx_);
-    } else {
-      avail_pages_[page_id] = std::move(pages);
-    }
+  int32_t page_id = page_id_[block_id];
+  std::vector<std::unique_ptr<MultiModelPage>> pages;
+  auto it_full = full_pages_.find(page_id);
+  if (it_full != full_pages_.end()) {  // in full pages
+    pages = std::move(it_full->second);
+    full_pages_.erase(it_full);
+  } else {
+    auto it_avail = avail_pages_.find(page_id);
+    CHECK_EQ(it_avail != avail_pages_.end(), true)
+        << "Invalid block id to free: " << block_id;
+    pages = std::move(it_avail->second);
+    avail_pages_.erase(it_avail);
   }
+  num_free_blocks_.fetch_add(1, std::memory_order_relaxed);
+  pages[0]->free(block_id);
+
+  if (pages[0]->empty()) {
+    size_t offset = pages[0]->get_offset();
+    offsets_.push_back(offset);
+
+    pages = batch_unmap(offset, std::move(pages));
+
+    pages[0]->reset();
+    page_allocator_->deallocate(std::move(pages));
+  } else {
+    avail_pages_[page_id] = std::move(pages);
+  }
+}
+std::vector<std::unique_ptr<MultiModelPage>>
+MultiModelBlockManagerImpl::batch_map(
+    size_t offset,
+    std::vector<std::unique_ptr<MultiModelPage>> pages) const {
+  for (int layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
+    VirPtr k_vit_ptr =
+        multi_layer_k_xtensor_->get_block_vir_ptr(offset, layer_idx);
+    VirPtr v_vit_ptr =
+        multi_layer_v_xtensor_->get_block_vir_ptr(offset, layer_idx);
+    map(k_vit_ptr, pages[layer_idx]->get_phy_handle());
+    map(v_vit_ptr, pages[layer_idx + num_layers_]->get_phy_handle());
+  }
+  return std::move(pages);
+}
+
+std::vector<std::unique_ptr<MultiModelPage>>
+MultiModelBlockManagerImpl::batch_unmap(
+    size_t offset,
+    std::vector<std::unique_ptr<MultiModelPage>> pages) const {
+  size_t aligned_size = pages[0]->get_page_size();
+  for (int layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
+    VirPtr k_vit_ptr =
+        multi_layer_k_xtensor_->get_block_vir_ptr(offset, layer_idx);
+    VirPtr v_vit_ptr =
+        multi_layer_v_xtensor_->get_block_vir_ptr(offset, layer_idx);
+    unmap(k_vit_ptr, aligned_size);
+    unmap(v_vit_ptr, aligned_size);
+  }
+  return std::move(pages);
+}
+// map one virtual pointer to one physical page
+void MultiModelBlockManagerImpl::map(VirPtr vir_ptr,
+                                     PhyMemHandle phy_handle) const {
+  // TODO：refactor virtensor shape
+  vmm::map(vir_ptr, phy_handle);
+}
+
+void MultiModelBlockManagerImpl::unmap(VirPtr vir_ptr,
+                                       size_t aligned_size) const {
+  vmm::unmap(vir_ptr, aligned_size);
+}
+
+void MultiModelBlockManagerImpl::add_multi_layer_kv_xtensor(
+    torch::Device device_) {
+  BlockMultiLayerXTensorPair multi_layer_kv_xtensor =
+      BlockMultiLayerXTensorTransfer::get_instance().move_multi_layer_xtensor(
+          device_.index(), model_idx_);
+  multi_layer_k_xtensor_ = std::move(multi_layer_kv_xtensor.first);
+  multi_layer_v_xtensor_ = std::move(multi_layer_kv_xtensor.second);
+  num_layers_ = multi_layer_k_xtensor_->get_num_layers();
 }
 /*
 std::vector<Block> BlockManagerImpl::allocate_shared(

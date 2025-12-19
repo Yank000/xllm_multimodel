@@ -71,16 +71,6 @@ void LLMMaster::init() {
   CHECK(engine_->init());
   task_type_ = options_.task_type();
 
-  if (master_coordinator_->get_serve_model_num() > 1) {
-    LOG(INFO) << "Multi-model serving mode, model idx: "
-              << options_.current_model_idx() << ", serve model num: "
-              << master_coordinator_->get_serve_model_num();
-    for (int i = 0; i < engine_->options().devices().size(); i++) {
-      master_coordinator_->multi_model_page_pool_init(
-          engine_->options().devices()[i]);
-    }
-  }
-
   model_args_ = engine_->model_args();
 
   bool enable_decode_response_to_service = false;

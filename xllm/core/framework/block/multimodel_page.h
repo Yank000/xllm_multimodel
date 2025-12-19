@@ -29,7 +29,7 @@ class MultiModelPage {
 
   PhyMemHandle get_phy_handle() const { return phy_handle_; }
 
-  void init(size_t block_mem_size);
+  void init(size_t block_mem_size, size_t offset);
 
   void reset();
 
@@ -44,6 +44,10 @@ class MultiModelPage {
   bool empty();
 
   size_t get_page_id() const { return page_id_; }
+
+  size_t get_page_size() const { return page_size_; }
+
+  size_t get_offset() const { return offset_; }
 
  private:
   void _require_init();
@@ -62,5 +66,7 @@ class MultiModelPage {
   size_t end_block_;
   size_t num_kv_blocks_;
   std::vector<size_t> free_list_;
+
+  size_t offset_;
 };
 }  // namespace xllm

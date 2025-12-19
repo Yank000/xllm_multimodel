@@ -125,6 +125,7 @@ class MultiModelBlockManagerImpl : public BlockManager {
   std::unordered_map<int32_t, std::vector<std::unique_ptr<MultiModelPage>>>
       full_pages_;
 
+  std::unordered_map<int32_t, int32_t> page_id_;
   // page allocator
   std::shared_ptr<MultiModelPagePool> page_allocator_;
 
@@ -132,6 +133,28 @@ class MultiModelBlockManagerImpl : public BlockManager {
   size_t block_mem_size_ = 0;
 
   int32_t model_idx_ = 0;
+
+  std::vector<size_t> offsets_;
+
+  void map(VirPtr vir_ptr, PhyMemHandle phy_handle) const;
+
+  void unmap(VirPtr vir_ptr, size_t aligned_size) const;
+
+  std::vector<std::unique_ptr<MultiModelPage>> batch_map(
+      size_t offset,
+      std::vector<std::unique_ptr<MultiModelPage>> pages) const;
+
+  std::vector<std::unique_ptr<MultiModelPage>> batch_unmap(
+      size_t offset,
+      std::vector<std::unique_ptr<MultiModelPage>> pages) const;
+
+  std::unique_ptr<BlockMultiLayerXTensor> multi_layer_k_xtensor_;
+
+  std::unique_ptr<BlockMultiLayerXTensor> multi_layer_v_xtensor_;
+
+  int64_t num_layers_;
+
+  void add_multi_layer_kv_xtensor(torch::Device device_);
 };
 
 }  // namespace xllm

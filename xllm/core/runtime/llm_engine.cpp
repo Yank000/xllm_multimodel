@@ -353,11 +353,7 @@ Engine::KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
         block_size * (slot_size + index_slot_size);
     kv_cache_cap.n_blocks = kv_cache_cap.cache_size_in_bytes /
                             (args_.n_layers() * block_size_in_bytes);
-    if (kv_cache_cap.n_blocks == 706)
-      kv_cache_cap.n_blocks = 704;
-    else if (kv_cache_cap.n_blocks == 1817)
-      kv_cache_cap.n_blocks = 1808;
-    // TODO:refactor me
+    // TODO:refactor me: align n_blocks with total_pages
     CHECK_GT(kv_cache_cap.n_blocks, 0) << "no n_blocks for kv cache";
   } else {
     int32_t n_pages =

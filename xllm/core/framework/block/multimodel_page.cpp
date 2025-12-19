@@ -38,7 +38,9 @@ void MultiModelPage::_require_init() {
   CHECK_NE(num_kv_blocks_, 0) << "Page not initialised";
 }
 
-void MultiModelPage::init(size_t block_mem_size) {
+void MultiModelPage::init(size_t block_mem_size, size_t offset) {
+  offset_ = offset;
+
   set_block_range(block_mem_size);
 
   num_kv_blocks_ = end_block_ - start_block_;
@@ -52,6 +54,7 @@ void MultiModelPage::reset() {
   start_block_ = 0;
   end_block_ = 0;
   num_kv_blocks_ = 0;
+  offset_ = 0;
 }
 
 void MultiModelPage::set_block_range(size_t block_mem_size) {
@@ -65,8 +68,8 @@ void MultiModelPage::set_block_range(size_t block_mem_size) {
                 | 0-6 | 6-12 | 12-18 | 18-24 | 24-30 | 30-32 |
         Blocks: |  0  |  1   |2<skip>|   3   |   4   |5<skip>|
   */
-  start_block_ = (page_id_ * page_size_ + block_mem_size - 1) / block_mem_size;
-  end_block_ = ((page_id_ + 1) * page_size_) / block_mem_size;
+  start_block_ = (offset_ + block_mem_size - 1) / block_mem_size;
+  end_block_ = (offset_ + page_size_) / block_mem_size;
 }
 
 size_t MultiModelPage::num_free_blocks() {

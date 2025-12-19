@@ -40,9 +40,8 @@ class MasterCoordinator {
   int64_t plan_mem() {
     auto min_mem =
         std::min_element(estimate_kv_mem.begin(), estimate_kv_mem.end());
-    LOG(ERROR) << "MasterCoordinator: plan mem = "
-               << (*min_mem / serve_model_num_);
-    return (*min_mem / serve_model_num_);
+    LOG(ERROR) << "MasterCoordinator: plan mem = " << *min_mem;
+    return *min_mem;
   }
 
   int32_t get_serve_model_num() const { return serve_model_num_; }
@@ -58,19 +57,11 @@ class MasterCoordinator {
       ;
       MultiModelPagePool::Options page_pool_options;
       page_pool_options.num_models(serve_model_num_)
-          .num_total_pages(plan_mem() * serve_model_num_ /
+          .num_total_pages(plan_mem() /
                            (2 * 1024 * 1024));  // TODO:2MB page size
       std::shared_ptr<MultiModelPagePool> multi_model_page_pool_ =
           std::make_shared<MultiModelPagePool>(page_pool_options, device);
       multi_model_page_pools_[device] = multi_model_page_pool_;
-    }
-  }
-
-  void multi_model_page_pool_init(torch::Device device) {
-    if (count_[device] == serve_model_num_) {
-      LOG(INFO) << "Initializing multi-model page pool for device "
-                << static_cast<int32_t>(device.index());
-      multi_model_page_pools_[device]->init();
     }
   }
 

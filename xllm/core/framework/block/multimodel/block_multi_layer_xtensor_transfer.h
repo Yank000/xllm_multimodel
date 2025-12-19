@@ -21,9 +21,9 @@ limitations under the License.
 
 namespace xllm {
 
-using BlockMultiLayerXTensorPairs =
-    std::pair<std::vector<std::unique_ptr<BlockMultiLayerXTensor>>,
-              std::vector<std::unique_ptr<BlockMultiLayerXTensor>>>;
+using BlockMultiLayerXTensorPair =
+    std::pair<std::unique_ptr<BlockMultiLayerXTensor>,
+              std::unique_ptr<BlockMultiLayerXTensor>>;
 
 class BlockMultiLayerXTensorTransfer {
  public:
@@ -39,7 +39,8 @@ class BlockMultiLayerXTensorTransfer {
       std::vector<std::shared_ptr<XTensor>>& v_xtensors,
       torch::Device device);
 
-  BlockMultiLayerXTensorPairs move_multi_layer_xtensors(int32_t device_id);
+  BlockMultiLayerXTensorPair move_multi_layer_xtensor(int32_t device_id,
+                                                      int32_t model_idx);
 
  private:
   BlockMultiLayerXTensorTransfer() = default;
