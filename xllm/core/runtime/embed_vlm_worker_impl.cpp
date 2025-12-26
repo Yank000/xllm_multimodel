@@ -44,7 +44,7 @@ bool EmbedVLMWorkerImpl::init_model(ModelContext& context) {
   CHECK(model_ == nullptr) << "Model is already initialized.";
 
   context.set_image_embedding_mode(true);
-  model_ = create_vlm_model(context);
+  model_ = create_vlm_embedding_model(context);
   CHECK(model_ != nullptr) << "Failed to create model.";
   model_executor_ = std::make_unique<Executor>(
       model_.get(), context.get_model_args(), device_, options_);
@@ -53,7 +53,7 @@ bool EmbedVLMWorkerImpl::init_model(ModelContext& context) {
 }
 
 std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
-    const BatchedForwardInputs& inputs) {
+    const ForwardInput& input) {
   torch::DeviceGuard device_guard(device_);
   auto ret = device_.synchronize_default_stream();
 
@@ -61,15 +61,14 @@ std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
 
   // TODO to adapt multi stream parallel later, just use [0] temporarily
   // all tensors should be on the same device as model
-  auto flatten_tokens = inputs.micro_inputs[0].token_ids.to(device_);
-  auto flatten_positions = inputs.micro_inputs[0].positions.to(device_);
-  auto params = inputs.micro_inputs[0].input_params.to(device_);
-  auto sampling_params =
-      inputs.micro_inputs[0].sampling_params.to(device_, dtype_);
+  auto flatten_tokens = input.token_ids.to(device_);
+  auto flatten_positions = input.positions.to(device_);
+  auto params = input.input_params.to(device_);
+  auto sampling_params = input.sampling_params.to(device_, dtype_);
 
   // call model executor forward to get hidden states
   auto hidden_states = model_executor_->forward(
-      {flatten_tokens}, {flatten_positions}, kv_caches_, {params});
+      flatten_tokens, flatten_positions, kv_caches_, params);
 
   ret = device_.synchronize_default_stream();
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
@@ -80,7 +79,18 @@ std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
 
   // driver prepare model output
   ForwardOutput output;
-  output.embedding = hidden_states;
+  SampleOutput sample_output;
+
+  if (sampling_params.selected_token_idxes.defined() &&
+      input.sampling_params.is_embeddings) {
+    EmbeddingVLM* em_model = dynamic_cast<EmbeddingVLM*>(model_.get());
+    auto embeddings =
+        em_model->pooler(hidden_states, sampling_params.selected_token_idxes);
+    sample_output.embeddings = embeddings;
+    output.sample_output = sample_output;
+    output.embedding = embeddings;
+  }
+
   return output;
 }
 

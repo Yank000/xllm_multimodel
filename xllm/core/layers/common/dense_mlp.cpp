@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "kernels/ops_api.h"
+#include "platform/device.h"
 
 namespace xllm {
 namespace layer {
@@ -57,16 +58,19 @@ DenseMLPImpl::DenseMLPImpl(int64_t hidden_size,
   }
 
   // 1. gate + up
+  int64_t out_feature = is_gated_ ? intermediate_size_ * 2 : intermediate_size_;
   gate_up_proj_ =
       register_module("gate_up_proj",
                       ColumnParallelLinear(hidden_size,
-                                           intermediate_size_ * 2,
+                                           out_feature,
                                            /*bias=*/has_bias,
                                            /*gather_output=*/false,
                                            quant_args,
                                            parallel_args,
                                            options,
                                            gate_up_proj_extra_args));
+
+  act_ = register_module("act", Activation(hidden_act_, is_gated_));
 
   // 2. down
   down_proj_ = register_module("down_proj",
@@ -89,19 +93,16 @@ torch::Tensor DenseMLPImpl::forward(const torch::Tensor& hidden_states) {
     // For w8a8 quantization, the active operation is fused with the down_proj
     return down_proj_->forward(gate_up);
   } else {
-    int64_t batch_size = gate_up.sizes()[0];
-    auto output = torch::empty(
-        {batch_size,
-         intermediate_size_ / parallel_args_.tp_group_->world_size()},
-        gate_up.options());
+    torch::Tensor output;
+    if (Device::type_str() != "npu") {
+      int64_t batch_size = gate_up.sizes()[0];
+      output = torch::empty(
+          {batch_size,
+           intermediate_size_ / parallel_args_.tp_group_->world_size()},
+          gate_up.options());
+    }
 
-    xllm::kernel::ActivationParams activation_params;
-    activation_params.input = gate_up;
-    activation_params.output = output;
-    activation_params.act_mode = hidden_act_;
-    activation_params.is_gated = is_gated_;
-    xllm::kernel::active(activation_params);
-
+    act_->forward(gate_up, output);
     return down_proj_->forward(output);
   }
 }
@@ -109,6 +110,20 @@ torch::Tensor DenseMLPImpl::forward(const torch::Tensor& hidden_states) {
 void DenseMLPImpl::load_state_dict(const StateDict& state_dict) {
   gate_up_proj_->load_state_dict(state_dict, {"gate_proj.", "up_proj."});
   down_proj_->load_state_dict(state_dict.get_dict_with_prefix("down_proj."));
+}
+
+void DenseMLPImpl::load_state_dict(const StateDict& state_dict,
+                                   const std::vector<std::string>& gate_up_name,
+                                   const std::string& down_name) {
+  if (is_gated_) {
+    CHECK_EQ(gate_up_name.size(), 2);
+    gate_up_proj_->load_state_dict(state_dict, gate_up_name);
+  } else {
+    CHECK_EQ(gate_up_name.size(), 1);
+    gate_up_proj_->load_state_dict(
+        state_dict.get_dict_with_prefix(gate_up_name[0]));
+  }
+  down_proj_->load_state_dict(state_dict.get_dict_with_prefix(down_name));
 }
 
 }  // namespace layer

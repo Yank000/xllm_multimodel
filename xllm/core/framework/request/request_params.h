@@ -49,6 +49,9 @@ struct RequestParams {
   RequestParams(const proto::EmbeddingRequest& request,
                 const std::string& x_rid,
                 const std::string& x_rtime);
+  RequestParams(const proto::MMEmbeddingRequest& request,
+                const std::string& x_rid,
+                const std::string& x_rtime);
   RequestParams(const proto::RerankRequest& request,
                 const std::string& x_rid,
                 const std::string& x_rtime);
@@ -139,6 +142,8 @@ struct RequestParams {
 
   // beam search
   int32_t beam_width = 0;
+
+  bool add_special_tokens = false;
 
   nlohmann::json chat_template_kwargs = nlohmann::json::object();
 };

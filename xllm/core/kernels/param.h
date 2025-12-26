@@ -55,7 +55,7 @@ struct RotaryParams {
   // Required in pack mode (when q/k are 3D). Size should be [batch_size + 1].
   // Note: In current MLU implementation, this is always passed to underlying
   // API.
-  torch::Tensor cu_query_lens;
+  std::optional<torch::Tensor> cu_query_lens;
   // Whether to use interleaved rotary embedding pattern.
   bool interleaved;
   // Whether to use discrete position mode. If true, position_ids must be
@@ -195,6 +195,9 @@ struct AttentionParams {
   float scale;
   // Whether to return log-sum-exp values in output_lse.
   bool return_lse = false;
+  // ========== Torch NPU related parameters ==========
+  torch::Tensor seq_lens;
+  torch::Tensor attn_mask;
 
   // ========== FlashInfer related parameters ==========
   torch::Tensor paged_kv_indptr;
@@ -371,76 +374,289 @@ struct MatmulParams {
   double beta = 0.0;
 };
 
-// Fused MoE parameters
-struct FusedMoEParams {
-  // Input hidden states tensor. Will be reshaped to 2D [tokens, hidden_size]
-  // internally. tokens = hidden_states.numel() / hidden_states.size(-1)
-  torch::Tensor hidden_states;
-  // Gating output tensor for expert selection. Will be reshaped to 2D [tokens,
-  // expert_num]. expert_num = gating_output.size(-1)
-  torch::Tensor gating_output;
-  // First weight matrix W1. Shape: [expert_size, ...]. expert_size =
-  // w1.size(0). Used in first group_gemm operation (trans_b=true).
-  torch::Tensor w1;
-  // Second weight matrix W2. Shape: [expert_size, ...].
-  // Used in second group_gemm operation (trans_b=true).
-  torch::Tensor w2;
-  // Optional bias for first activation.
-  std::optional<torch::Tensor> bias1;
-  // Optional bias for output combination.
-  std::optional<torch::Tensor> bias2;
-  // Optional residual tensor. Will be reshaped to 2D [tokens, hidden_size]
-  // internally. Added to final output after MoE combine result.
-  std::optional<torch::Tensor> residual;
-  // Optional input smooth quantization scale. For smooth quant mode.
-  // Must be present together with act_smooth, w1_scale, w2_scale.
-  // Used to quantize hidden_states before first group_gemm.
-  std::optional<torch::Tensor> input_smooth;
-  // Optional activation smooth quantization scale. For smooth quant mode.
-  // Must be present together with input_smooth, w1_scale, w2_scale.
-  // Used to quantize gemm1_out after activation.
-  std::optional<torch::Tensor> act_smooth;
-  // Optional W1 quantization scale. For smooth quant mode.
-  // Must be present together with input_smooth, act_smooth, w2_scale.
-  // Used in first group_gemm as b_scale.
-  std::optional<torch::Tensor> w1_scale;
-  // Optional W2 quantization scale. For smooth quant mode.
-  // Must be present together with input_smooth, act_smooth, w1_scale.
-  // Used in second group_gemm as b_scale.
-  std::optional<torch::Tensor> w2_scale;
-  // Optional expert score correction bias.
-  std::optional<torch::Tensor> e_score_correction_bias;
+struct GroupGemmParams {
+  // Input activation tensor.
+  // Shape: 2D [M, K] if trans_a==false; [K, M] if trans_a==true.
+  // Must be contiguous. Dtype: float16, bfloat16, or float32.
+  // Must have same dtype and device as b, output.
+  torch::Tensor a;
+  // Weight tensor.
+  // If trans_b is true, shape is (num_experts, N, K) or (N, K);
+  // if trans_b is false, shape is (num_experts, K, N) or (K, N).
+  // Must be contiguous. Dtype and device must match a, output.
+  torch::Tensor b;
+  // Per-expert token count tensor.
+  // Shape: 1D [num_experts]. Type must be int32.
+  // Controls number of tokens processed per group/expert.
+  torch::Tensor token_count;
+  // Output tensor.
+  // Shape: [num_experts, N] or [num_experts, N, K]. num_experts =
+  // token_count.size(0). Must be contiguous. Dtype and device must match a.
+  torch::Tensor output;
+  // Optional scale tensor for a (input activation), used in quantized mode.
+  // Shape depends on quantization granularity.
+  std::optional<torch::Tensor> a_scale;
+  // Optional scale tensor for b (weight), used in quantized mode.
+  // Shape depends on quantization granularity.
+  std::optional<torch::Tensor> b_scale;
+  // Optional quantization config flag list.
+  // Used to control per-expert weight quantization mode.
+  std::optional<torch::List<int64_t>> quant_flag;
+  // Maximum workspace dimension (e.g., maximum tokens per expert allowed).
+  // Used for configuring inner kernel workspace.
+  int64_t max_dim;
+  // Whether to transpose a:
+  // false: [M, K] (default); true: [K, M].
+  bool trans_a;
+  // Whether to transpose b:
+  // false: [K, N] (default); true: [N, K].
+  bool trans_b;
+  // Quantization bit-width for input a.
+  // Set -1 to disable quantization.
+  int64_t a_quant_bit;
+};
+
+struct MoeActiveTopkParams {
+  // Input tensor.
+  // Shape: [*, num_mask, num_expert] (e.g., [batch, num_mask, num_expert]).
+  // Dtype: float32, float16, bfloat16.
+  // Must be contiguous.
+  torch::Tensor input;
   // Number of top-k experts to select per token.
+  // Constraint: 0 < topk <= num_expert.
   int64_t topk;
+  // Number of expert groups for group-limited top-k selection.
+  // If > 1, mask must be None, and num_expert % num_expert_group == 0.
+  int64_t num_expert_group;
+  // Maximum selected experts per group.
+  // Constraint: 0 < topk_group <= num_expert_group.
+  int64_t topk_group;
   // Whether to renormalize expert weights after top-k selection.
-  bool renormalize;
-  // Whether to use gated activation. If true, activation output shape is
-  // halved.
-  bool gated;
-  // Activation mode string.
-  // Supported: "none", "gelu", "silu".
-  std::string act_mode = "none";
-  // Scoring function for expert selection. Default: "softmax".
+  bool normalize;
+  // Optional mask tensor.
+  // Shape: [1, ..., 1, num_mask, num_expert] (leading dims must be 1).
+  // Dtype must match input.
+  // Must be contiguous.
+  std::optional<torch::Tensor> mask;
+  // Normalization logic after top-k selection.
+  // For softmax: "topk_logit" or "softmax_logit".
+  // For sigmoid: "topk_logit" or "sigmoid_logit".
+  std::string normed_by;
+  // Scoring function for expert selection.
   // Supported: "softmax", "sigmoid".
-  std::string scoring_func = "softmax";
-  // Number of expert groups. Default: -1.
-  int64_t num_expert_group = -1;
-  // Top-k group parameter. Default: 0.
-  int64_t topk_group = 0;
-  // Route scaling factor. Default: 1.0.
-  double route_scale = 1.0;
-  // Starting expert ID. Used to slice token_count and cusum_token_count.
-  // Processing range: [start_expert_id, start_expert_id + expert_size).
+  std::string scoring_func;
+  // Route scaling factor applied to routing scores.
+  double route_scale;
+  // Optional expert score correction bias.
+  // Shape: [num_expert].
+  // Dtype: float32, float16, or bfloat16.
+  // Must be contiguous.
+  std::optional<torch::Tensor> e_score_correction_bias;
+};
+
+struct MoeGenIdxParams {
+  // The input tensor stores the expert id of each token.
+  // Shape: [num_tokens, topk].
+  // Dtype: int32.
+  torch::Tensor expert_id;
+  // Expert number.
+  // Must be >= 0.
+  int64_t expert_num;
+};
+
+struct MoeExpandInputParams {
+  // Input tensor to be expanded.
+  // Shape: [token_num, hidden_size].
+  // Dtype: int8, float, half, or bfloat16.
+  torch::Tensor input;
+  // Index tensor for gather operation.
+  // Shape: [expand_token_num].
+  // Dtype: int32.
+  torch::Tensor gather_index;
+  // Optional prefix sum of token count per expert.
+  // Shape: [num_experts + 1].
+  // Dtype: int32.
+  // If provided, adjusts gather range for each expert.
+  std::optional<torch::Tensor> cusum_token_count;
+  // Starting expert id to process.
+  // Must be >= 0.
+  int64_t start_expert_id;
+  // Number of experts to process in this call.
+  // Must be >= 0.
+  int64_t expert_size;
+};
+
+struct MoeCombineResultParams {
+  // Expert output tensor to be combined.
+  // Shape: [num_tokens * topk, hidden_size].
+  // - Must be contiguous.
+  // - Dtype: float32, float16, or bfloat16.
+  // - This is the concatenated output from all experts, not yet reordered back
+  // to the original sequence order.
+  torch::Tensor input;
+  // Router/gating weights tensor. Used for weighted combination of expert
+  // outputs. Shape: [num_tokens, topk].
+  // - Must be contiguous at last dimension.
+  // - Dtype: float32.
+  // - Constraint: reduce_weight.numel() == input.size(0).
+  torch::Tensor reduce_weight;
+  // Gather index tensor that maps combined output to original token positions.
+  // Shape: [num_tokens * topk].
+  // - Must be contiguous.
+  // - Dtype: int32.
+  // - Corresponds to permutation/scatter indices for reordering expert outputs.
+  torch::Tensor gather_ids;
+  // Optional residual connection input.
+  // Shape: [num_tokens, hidden_size].
+  // - Must have same shape and dtype as output if provided.
+  // - Must be contiguous if provided.
+  // - Default: std::nullopt (no residual).
+  std::optional<torch::Tensor> residual;
+  // Optional cumulative token count for expert assignment.
+  // Shape: [num_experts + 1] or deduced by expert_size.
+  // - Must be contiguous if provided.
+  // - Dtype: int32.
+  // - Used to infer num_expert or assist calculation in some kernels.
+  std::optional<torch::Tensor> cusum_token_count;
+  // Starting expert ID
+  // - Must be >= 0.
+  // - Used to mark the offset of current experts being processed (for
+  // sharding).
   int64_t start_expert_id = 0;
-  // Enforce every expert get equal number of tokens
-  // This option has not implemented yet.
-  bool avg_moe = false;
-  // Optional quantization flag list for W1.
-  // Used in first group gemm.
-  std::optional<torch::List<int64_t>> w1_quant_flag;
-  // Optional quantization flag list for W2.
-  // Used in second group gemm.
-  std::optional<torch::List<int64_t>> w2_quant_flag;
+  // Number of experts processed in this step.
+  // - If cusum_token_count not given, num_expert is set to this value.
+  // - If cusum_token_count given, deduced num_expert must satisfy:
+  //   num_expert >= start_expert_id + expert_size
+  int64_t expert_size = 0;
+  // Optional bias tensor.
+  // WARNING: Bias addition is NOT supported in current implementation.
+  // Always keep as std::nullopt unless bias support is added in the future.
+  std::optional<torch::Tensor> bias;
+};
+
+struct MoeAll2AllGenSendLayoutParams {
+  // Expert token count tensor.
+  // Shape: [expert_num].
+  // Dtype: int32.
+  // Each element represents the number of tokens assigned to each expert.
+  torch::Tensor token_count;
+  // Number of ranks (processes) participating in All2All.
+  // Must be >= 0.
+  int64_t nrank;
+};
+
+struct MoeAll2AllGenGatherIndexParams {
+  // The table that indicates the relationship of token for each Expert Parallel
+  // part. Shape: [rank_num, expert_num], where rank_num is the number of
+  // devices in Expert Parallel, and expert_num is the number of experts handled
+  // by each device. Dtype: int32.
+  torch::Tensor token_num;
+  // The max token count for each rank (used for padding).
+  // Dtype: int32. Must be >= 0.
+  int64_t pad_num;
+  // Whether to return the cusum_token_count tensor.
+  // If true, cusum_token_count will be returned.
+  bool return_cusum_token_count = false;
+};
+
+struct MoeAll2AllCreateParams {
+  // Byte size of a single token for dispatch All-to-All operation.
+  // Each token to be dispatched requires this many bytes.
+  int64_t dispatch_token_byte;
+  // Byte size of a single token for combine All-to-All operation.
+  // Each token to be combined requires this many bytes.
+  int64_t combine_token_byte;
+  // Maximum number of experts participating in the All-to-All operation.
+  // (Sets the upper bound for how many experts can be involved.
+  int64_t max_expert_num;
+  // Maximum number of tokens to be processed.
+  // Upper bound on the total batch size in tokens for the operation.
+  int64_t max_token_num;
+  // Rank ID of the current process in the distributed group, within [0,
+  // nrank-1]. Identifies this process within the world group.
+  int64_t rank;
+  // Total number of processes in the distributed group.
+  // Used for collective communication context and split assignment.
+  int64_t nrank;
+  // The current compute device to be used、
+  // default to CPU
+  torch::Device device = torch::Device(torch::kCPU);
+};
+
+struct MoeAll2AllInitParams {
+  // communication backend handle for All-to-All operation.
+  // obtained from moe_all2all_create.
+  int64_t handle;
+  // CPU tensor containing aggregated exchange information from all nrank
+  // processes.
+  torch::Tensor all_exchange_info;
+  // The current compute device to be used
+  // default to CPU
+  torch::Device device = torch::Device(torch::kCPU);
+};
+
+struct MoeAll2AllDispatchParams {
+  // Communication backend handle for All-to-All operation.
+  // Obtained from moe_all2all_create.
+  int64_t handle;
+  // Byte size of a single token.
+  int64_t token_byte;
+  // Number of tokens to be processed in the current operation.
+  int64_t token_num;
+  // Offset and token count for each rank.
+  // Output from torch_mlu_ops.moe_all2all_gen_send_layout(token_count, nrank).
+  // The token_count is generated by moe_gen_idx.
+  // Shape: [nrank, 2]. Type: int32.
+  torch::Tensor send_layout;
+  // Number of tokens to send to each expert.
+  // Shape: [max_expert_num]. Type: int32.
+  torch::Tensor send_token_num;
+  // Offset and token count from peer ranks.
+  // Shape: [nrank, 2]. Type: int32.
+  torch::Tensor recv_layout;
+  // Expected number of tokens to receive from each expert.
+  // Shape: [max_expert_num]. Type: int32.
+  torch::Tensor recv_token_num;
+  // Optional tensor containing tokens to dispatch.
+  // If not provided, defaults to dispatch_send created by moe_all2all_create.
+  std::optional<torch::Tensor> send_token;
+  // Optional buffer for receiving tokens.
+  // If not provided, defaults to dispatch_recv created by moe_all2all_create.
+  std::optional<torch::Tensor> recv_token;
+};
+
+struct MoeAll2AllCombineParams {
+  // communication backend handle for All-to-All operation.
+  // obtained from moe_all2all_create.
+  int64_t handle;
+  // Byte size of a single token.
+  int64_t token_byte;
+  // The number of tokens to receive.
+  int64_t token_num;
+  // The offset and token count for each rank, output from
+  // torch_mlu_ops.moe_all2all_gen_send_layout(recv_token_num, nrank).
+  // Shape: [nrank, 2],
+  // Type: int32.
+  torch::Tensor send_src_layout;
+  // The expected receive pattern from peer ranks.
+  // Shape: [nrank, 2],
+  // Type: int32.
+  torch::Tensor send_dst_layout;
+  // Optional tensor containing the tokens to dispatch. If not provided,
+  // defaults to combine_send created by moe_all2all_create.
+  std::optional<torch::Tensor> send_token;
+  // Optional buffer for receiving tokens. If not provided,
+  // defaults to combine_recv created by moe_all2all_create.
+  std::optional<torch::Tensor> recv_token;
+};
+
+struct MoeAll2AllDestroyParams {
+  // communication backend handle for All-to-All operation.
+  // obtained from moe_all2all_create.
+  int64_t handle;
+  // The current compute device to be used
+  // default to CPU
+  torch::Device device = torch::Device(torch::kCPU);
 };
 
 // Per token smooth quantize parameters
@@ -654,6 +870,31 @@ struct MaskedIndexerSelectPagedKVParams {
   torch::Tensor new_context_lens;
   // Quantization block size. Must equal to head_size (query.size(-1)).
   int64_t quant_block_size;
+};
+
+struct GatherSplitParams {
+  // Input tensor. Shape: (token_num, input_size).
+  // Dtype: int8, float32, float16, or bfloat16.
+  torch::Tensor input;
+  // Gather index tensor. Shape: (token_num).
+  // Dtype: int32.
+  // Used to select valid tokens from the input tensor.
+  torch::Tensor gather_index;
+  // Number of valid tokens tensor. Shape: (1).
+  // Dtype: int32.
+  // Its first element is the actual valid token count: valid_token_num =
+  // valid_token_num[0].item().
+  torch::Tensor valid_token_num;
+  // Output tensor for the "head" split. Shape: (token_num, size_0).
+  // Dtype: same as input.
+  // Holds the gathered and split tokens for the first size_0 elements of each
+  // token.
+  torch::Tensor output_head;
+  // Optional output tensor for the "tail" split. Shape: (token_num, input_size
+  // - size_0). Dtype: same as input. If provided, holds the gathered and split
+  // tokens for the remaining elements after size_0.
+  // Pass empty tensor to skip the tail split.
+  torch::Tensor output_tail;
 };
 
 }  // namespace xllm::kernel

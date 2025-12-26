@@ -23,6 +23,7 @@ limitations under the License.
 #include <limits>
 #include <vector>
 
+#include "framework/batch/batch_forward_type.h"
 #include "framework/request/mm_data.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
@@ -53,6 +54,8 @@ class Batch {
     sequence_groups_.push_back(sequence_group);
   }
 
+  void update_forward_type(Sequence* sequence);
+
   void set_swap_block_transfer_infos(
       std::vector<BlockTransferInfo>* swap_block_transfer_infos) {
     swap_block_transfer_infos_ = swap_block_transfer_infos;
@@ -82,9 +85,7 @@ class Batch {
                                      const ModelArgs& args);
 
   // Convert Batch to pb type, which will be pass to remote worker.
-  RawForwardInput prepare_forward_input(uint32_t start_idx,
-                                        uint32_t end_idx,
-                                        const ModelArgs& args,
+  RawForwardInput prepare_forward_input(const ModelArgs& args,
                                         ThreadPool* thread_pool);
 
   // process output
@@ -113,11 +114,10 @@ class Batch {
     return allowed_max_tokens_;
   }
 
-  void set_batch_prefill_status(const bool all_seqs_in_prefill) {
-    all_seqs_in_prefill_ = all_seqs_in_prefill;
+  std::map<uint32_t, uint32_t> cal_seq_exchange_index_test(
+      std::vector<uint32_t>& kv_cache_tokens_num) {
+    return cal_seq_exchange_index(kv_cache_tokens_num);
   }
-
-  bool get_batch_prefill_status() const { return all_seqs_in_prefill_; }
 
  private:
   bool update_sequence_state(Sequence* seq, bool replace_fake_token);
@@ -128,6 +128,11 @@ class Batch {
                                  bool replace_fake_token);
 
   void process_beam_search();
+
+  std::map<uint32_t, uint32_t> cal_seq_exchange_index(
+      std::vector<uint32_t>& kv_cache_tokens_num);
+
+  void dp_balance_shuffle_seqs();
 
   std::vector<Sequence*> sequences_;
   std::vector<SequencesGroup*> sequence_groups_;
@@ -142,8 +147,7 @@ class Batch {
   // mm_data in the batch
   std::vector<MMData> mm_data_vec_;
 
-  // all sequences in this batch are in prefill stage
-  bool all_seqs_in_prefill_ = false;
+  BatchForwardType batch_forward_type_;
 
   uint64_t batch_id_ = UNINITIALIZED_BATCH_ID;
 };

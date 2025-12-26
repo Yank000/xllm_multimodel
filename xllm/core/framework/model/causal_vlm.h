@@ -40,11 +40,10 @@ class CausalVLMImpl : public CausalVLM {
   CausalVLMImpl(Model model, const torch::TensorOptions& options)
       : model_(std::move(model)), options_(options) {}
 
-  torch::Tensor forward(
-      const std::vector<torch::Tensor>& tokens,
-      const std::vector<torch::Tensor>& positions,
-      std::vector<KVCache>& kv_caches,
-      const std::vector<ModelInputParams>& parameters) override {
+  torch::Tensor forward(const torch::Tensor& tokens,
+                        const torch::Tensor& positions,
+                        std::vector<KVCache>& kv_caches,
+                        const ModelInputParams& parameters) override {
     return model_->forward(tokens, positions, kv_caches, parameters);
   }
 
@@ -64,17 +63,36 @@ class CausalVLMImpl : public CausalVLM {
 
   virtual void update_expert_weight(int32_t layer_id) { return; }
 
-  layer::LmHead get_lm_head() override { return model_->get_lm_head(); };
-
-  void set_lm_head(layer::LmHead& head) override { model_->set_lm_head(head); };
-
-  std::vector<layer::WordEmbedding> get_word_embedding() override {
-    return model_->get_word_embedding();
+  layer::LmHead get_lm_head() override {
+    if constexpr (detail::has_get_lm_head<Model>::value) {
+      return model_->get_lm_head();
+    } else {
+      return CausalLM::get_lm_head();
+    }
   };
 
-  void set_word_embedding(
-      std::vector<layer::WordEmbedding>& embedding) override {
-    model_->set_word_embedding(embedding);
+  void set_lm_head(layer::LmHead& head) override {
+    if constexpr (detail::has_set_lm_head<Model>::value) {
+      model_->set_lm_head(head);
+    } else {
+      CausalLM::set_lm_head(head);
+    }
+  };
+
+  layer::WordEmbedding get_word_embedding() override {
+    if constexpr (detail::has_get_word_embedding<Model>::value) {
+      return model_->get_word_embedding();
+    } else {
+      return CausalLM::get_word_embedding();
+    }
+  };
+
+  void set_word_embedding(layer::WordEmbedding& embedding) override {
+    if constexpr (detail::has_set_word_embedding<Model>::value) {
+      model_->set_word_embedding(embedding);
+    } else {
+      CausalLM::set_word_embedding(embedding);
+    }
   };
 
   torch::Device device() const override { return options_.device(); }

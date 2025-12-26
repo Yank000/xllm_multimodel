@@ -52,12 +52,39 @@ void Batch::add(Sequence* sequence, uint32_t allowed_max_token) {
     input_embeddings_vec_.emplace_back(input_embedding);
 
   const auto& mm_data = sequence->get_mm_data();
-  //  if (sequence->is_prefill_stage() &&  mm_data.valid()) // TODO:Compatible
-  //  With Chunked Prefill
-  if ((sequence->kv_state().kv_cache_tokens_num() <
-       sequence->num_prompt_tokens()) &&
-      mm_data.valid())
+  //  if (sequence->is_chunked_prefill_stage() &&  mm_data.valid())
+  // TODO:Compatible With Chunked Prefill
+  if ((sequence->stage() == SequenceStage::PREFILL) && mm_data.valid()) {
     mm_data_vec_.emplace_back(mm_data);
+  }
+}
+
+void Batch::update_forward_type(Sequence* sequence) {
+  auto stage = sequence->stage();
+  switch (batch_forward_type_.value()) {
+    case BatchForwardType::PREFILL:
+      if (stage == SequenceStage::CHUNKED_PREFILL) {
+        batch_forward_type_ = BatchForwardType::CHUNKED_PREFILL;
+      } else if (stage == SequenceStage::DECODE) {
+        batch_forward_type_ = BatchForwardType::MIXED;
+      }
+      break;
+    case BatchForwardType::CHUNKED_PREFILL:
+      if (stage == SequenceStage::DECODE) {
+        batch_forward_type_ = BatchForwardType::MIXED;
+      }
+      break;
+    case BatchForwardType::DECODE:
+      if (stage != SequenceStage::DECODE) {
+        batch_forward_type_ = BatchForwardType::MIXED;
+      }
+      break;
+    case BatchForwardType::MIXED:
+      break;
+    case BatchForwardType::EMPTY:
+      batch_forward_type_ = BatchForwardType(static_cast<int32_t>(stage));
+      break;
+  }
 }
 
 void Batch::add(const std::vector<Sequence*>& sequences) {
@@ -75,15 +102,103 @@ ForwardInput Batch::prepare_forward_input(uint32_t num_decoding_tokens,
                             mm_data_vec_,
                             swap_block_transfer_infos_,
                             batch_id_,
-                            &args);
+                            &args,
+                            batch_forward_type_);
   return builder.build_forward_input(num_decoding_tokens,
                                      min_decoding_batch_size);
 }
 
-RawForwardInput Batch::prepare_forward_input(uint32_t start_idx,
-                                             uint32_t end_idx,
-                                             const ModelArgs& args,
+void Batch::dp_balance_shuffle_seqs() {
+  // this shuffle operation is mainly used for npu with 24 cores
+  // and specific mla op implementation
+  const auto num_npu_cores = 24;  // npu cube core num
+  if (FLAGS_enable_customize_mla_kernel && FLAGS_enable_dp_balance &&
+      sequences_.size() > num_npu_cores) {
+    std::vector<uint32_t> kv_cache_tokens_num;
+    kv_cache_tokens_num.reserve(sequences_.size());
+    for (auto& seq : sequences_) {
+      kv_cache_tokens_num.push_back(seq->kv_state().kv_cache_tokens_num());
+    }
+    auto seq_index_shift = cal_seq_exchange_index(kv_cache_tokens_num);
+
+    std::vector<Sequence*> balanced_sequences;
+    std::vector<uint32_t> balanced_allowed_max_tokens;
+    balanced_sequences.resize(sequences_.size());
+    balanced_allowed_max_tokens.resize(allowed_max_tokens_.size());
+    for (auto& ele : seq_index_shift) {
+      balanced_sequences[ele.second] = sequences_[ele.first];
+      balanced_allowed_max_tokens[ele.second] = allowed_max_tokens_[ele.first];
+    }
+
+    CHECK_EQ(sequences_.size(), balanced_sequences.size());
+    sequences_ = std::move(balanced_sequences);
+    allowed_max_tokens_ = std::move(balanced_allowed_max_tokens);
+  }
+}
+
+std::map<uint32_t, uint32_t> Batch::cal_seq_exchange_index(
+    std::vector<uint32_t>& kv_cache_tokens_num) {
+  const auto num_npu_cores = 24;  // npu cube core num
+  const auto num_seqs = kv_cache_tokens_num.size();
+  const auto base_per_core = num_seqs / num_npu_cores;
+  const auto remainder = num_seqs % num_npu_cores;
+
+  // find the indices of the remainder biggest elements
+  std::vector<uint32_t> indices(num_seqs);
+  std::iota(indices.begin(), indices.end(), 0);
+  if (remainder > 0) {
+    std::nth_element(indices.begin(),
+                     indices.end() - remainder,
+                     indices.end(),
+                     [&kv_cache_tokens_num](uint32_t a, uint32_t b) {
+                       return kv_cache_tokens_num[a] < kv_cache_tokens_num[b];
+                     });
+  }
+
+  std::vector<uint32_t> base_indices(indices.begin(),
+                                     indices.end() - remainder);
+  std::vector<uint32_t> remainder_indices(indices.end() - remainder,
+                                          indices.end());
+
+  // sort base_indices in descending order
+  std::sort(base_indices.begin(),
+            base_indices.end(),
+            [&kv_cache_tokens_num](uint32_t a, uint32_t b) {
+              return kv_cache_tokens_num[a] > kv_cache_tokens_num[b];
+            });
+
+  // allocate a long and a short request to each core, to ensuring
+  // load balance among all cores
+  std::vector<std::vector<uint32_t>> base_assignment(
+      num_npu_cores, std::vector<uint32_t>(base_per_core));
+  for (auto i = 0; i < base_indices.size(); ++i) {
+    auto col = i / num_npu_cores;
+    auto row = (col % 2 == 0) ? (i % num_npu_cores)
+                              : (num_npu_cores - 1 - (i % num_npu_cores));
+    base_assignment[row][col] = base_indices[i];
+  }
+
+  // record the index map, first one is original index,
+  // second one is the target index to be exchanged to
+  std::map<uint32_t, uint32_t> index_shift;
+  // add base part data
+  for (auto i = 0; i < num_npu_cores; ++i) {
+    for (auto j = 0; j < base_per_core; ++j) {
+      auto idx = base_assignment[i][j];
+      index_shift[idx] = i + j * num_npu_cores;
+    }
+  }
+  // add remainder part data
+  for (auto i = 0; i < remainder; ++i) {
+    index_shift[remainder_indices[i]] = i + num_npu_cores * base_per_core;
+  }
+
+  return index_shift;
+}
+
+RawForwardInput Batch::prepare_forward_input(const ModelArgs& args,
                                              ThreadPool* thread_pool) {
+  dp_balance_shuffle_seqs();
   BatchInputBuilder builder(sequences_,
                             allowed_max_tokens_,
                             input_embeddings_vec_,
@@ -91,8 +206,9 @@ RawForwardInput Batch::prepare_forward_input(uint32_t start_idx,
                             swap_block_transfer_infos_,
                             batch_id_,
                             &args,
+                            batch_forward_type_,
                             thread_pool);
-  return builder.build_raw_forward_input(start_idx, end_idx);
+  return builder.build_raw_forward_input();
 }
 
 void Batch::process_sample_output(const RawForwardOutput& raw_output,
@@ -193,7 +309,7 @@ bool Batch::update_sequence_state(Sequence* seq, bool replace_fake_token) {
   // prefill-or-not state of last stage, otherwise, we need the state
   // of current stage.
   if (FLAGS_enable_chunked_prefill) {
-    if (!replace_fake_token && seq->is_prefill_stage()) {
+    if (!replace_fake_token && seq->is_chunked_prefill_stage()) {
       seq->pre_scheduled_step_prefill_queue().push(true);
       // if not replace_fake_token, pop out here to avoid endless growth
       if (seq->pre_scheduled_step_prefill_queue().size() > 2) {
@@ -223,7 +339,7 @@ void Batch::append_token_for_sequence(Sequence* seq,
         seq->pre_scheduled_step_prefill_queue().pop();
       }
     }
-  } else {
+  } else if (!seq->cancelled()) {
     // truely update the real token if replace_fake_token
     seq->update_last_step_token(token, token_idx);
     if (FLAGS_enable_chunked_prefill && token_idx == 0) {

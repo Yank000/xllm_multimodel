@@ -31,12 +31,12 @@ limitations under the License.
 #include "api_service/stream_output_parser.h"
 #include "core/common/instance_name.h"
 #include "core/common/types.h"
-#include "core/framework/request/mm_input_helper.h"
 #include "core/framework/request/request_params.h"
 #include "core/runtime/llm_master.h"
 #include "core/runtime/vlm_master.h"
 #include "core/util/utils.h"
 #include "core/util/uuid.h"
+#include "mm_service_utils.h"
 
 namespace xllm {
 namespace {
@@ -594,6 +594,29 @@ void ChatServiceImpl::process_async_impl(std::shared_ptr<ChatCall> call) {
   messages.reserve(rpc_request.messages_size());
   for (const auto& message : rpc_request.messages()) {
     messages.emplace_back(message.role(), message.content());
+    auto& msg = messages.back();
+
+    if (message.has_tool_call_id()) {
+      msg.tool_call_id = message.tool_call_id();
+    }
+
+    if (message.has_reasoning_content()) {
+      msg.reasoning_content = message.reasoning_content();
+    }
+
+    if (message.tool_calls_size() > 0) {
+      Message::ToolCallVec tool_calls;
+      tool_calls.reserve(message.tool_calls_size());
+      for (const auto& tool_call : message.tool_calls()) {
+        tool_calls.emplace_back();
+        auto& tc = tool_calls.back();
+        tc.id = tool_call.id();
+        tc.type = tool_call.type();
+        tc.function.name = tool_call.function().name();
+        tc.function.arguments = tool_call.function().arguments();
+      }
+      msg.tool_calls = std::move(tool_calls);
+    }
   }
 
   bool include_usage = false;
@@ -703,22 +726,6 @@ void MMChatServiceImpl::process_async_impl(std::shared_ptr<MMChatCall> call) {
     return;
   }
 
-  // check if the request image number exceeds the allowed image limit.
-  int image_count = 0;
-  const int image_limit = master_->get_image_limit();
-  for (const auto& message : req_messages) {
-    for (const auto& content_item : message.content()) {
-      if (content_item.type() == "image_url") {
-        ++image_count;
-        if (image_count > image_limit) {
-          call->finish_with_error(
-              StatusCode::INVALID_ARGUMENT,
-              "Number of images exceeds the allowed image limit.");
-          return;
-        }
-      }
-    }
-  }
   // Check if the request is being rate-limited.
   if (master_->get_rate_limiter()->is_limited()) {
     call->finish_with_error(
@@ -731,12 +738,8 @@ void MMChatServiceImpl::process_async_impl(std::shared_ptr<MMChatCall> call) {
       rpc_request, call->get_x_request_id(), call->get_x_request_time());
 
   std::vector<Message> messages;
-  MMInput mm_inputs;
-
-  static MMInputHelper helper;
-  if (!helper.trans(req_messages, messages, mm_inputs.items_)) {
-    call->finish_with_error(StatusCode::INVALID_ARGUMENT,
-                            "inputs argument is invalid.");
+  if (!build_messages<MMChatCall>(
+          req_messages, messages, call, master_->get_image_limit())) {
     return;
   }
 
@@ -751,7 +754,6 @@ void MMChatServiceImpl::process_async_impl(std::shared_ptr<MMChatCall> call) {
   // schedule the request
   master_->handle_request(
       std::move(messages),
-      std::move(mm_inputs),
       std::move(request_params),
       [call,
        model,

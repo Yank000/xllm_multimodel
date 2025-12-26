@@ -52,6 +52,15 @@ class MMType {
   Value value = Value::NONE;
 };
 
+struct VideoMetadata {
+  double fps = 0.0;              // original fps
+  int64_t total_num_frames = 0;  // original frames
+  double duration = 0.0;
+  double sampled_fps = 0.0;
+  torch::Tensor frame_indices;
+  std::vector<double> timestamps;
+};
+
 using MMKey = std::string;
 using MMValue = std::variant<torch::Tensor, std::vector<torch::Tensor>>;
 using MMDict = std::unordered_map<MMKey, MMValue>;
@@ -79,6 +88,22 @@ struct MMData {
     ty_ |= type;
     data_.insert({key, value});
     return true;
+  }
+
+  template <typename T>
+  bool update(uint32_t type, const MMKey& key, const T& value) {
+    const auto& itor = data_.find(key);
+    if (itor != data_.end()) {
+      // Key exists, update it
+      data_[key] = value;
+      ty_ |= type;
+      return true;
+    } else {
+      // Key doesn't exist, add it (same as add method)
+      ty_ |= type;
+      data_.insert({key, value});
+      return true;
+    }
   }
 
   template <typename T>
@@ -117,11 +142,22 @@ struct MMData {
 
   void debug_print() const;
 
+  const std::vector<VideoMetadata>& get_video_metadata() const {
+    return video_metadata_;
+  }
+
+  void set_video_metadata(const std::vector<VideoMetadata>& meta) {
+    video_metadata_ = meta;
+  }
+
   static MMData to(const MMData& mm_data, const torch::Device& device);
   static MMData batch(const std::vector<MMData>& mm_datas);
 
   uint32_t ty_ = MMType::NONE;
   MMDict data_;
+
+ private:
+  std::vector<VideoMetadata> video_metadata_;
 };
 
 }  // namespace xllm

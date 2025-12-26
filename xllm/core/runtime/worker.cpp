@@ -58,8 +58,9 @@ Worker::Worker(const ParallelArgs& parallel_args,
 
 Worker::~Worker() { delete impl_; }
 
-bool Worker::init_model(const std::string& model_weights_path) {
-  return impl_->init_model(model_weights_path);
+bool Worker::init_model(const std::string& model_weights_path,
+                        int32_t random_seed) {
+  return impl_->init_model(model_weights_path, random_seed);
 }
 
 bool Worker::allocate_kv_cache(
@@ -106,10 +107,7 @@ ForwardInput Worker::prepare_inputs(Batch& batch) {
 }
 
 std::optional<ForwardOutput> Worker::step(const ForwardInput& inputs) {
-  // TODO to adapt multi stream parallel later
-  BatchedForwardInputs batched_inputs;
-  batched_inputs.micro_inputs = {std::move(inputs)};
-  return impl_->step(batched_inputs);
+  return impl_->step(inputs);
 }
 
 const bool Worker::is_driver() { return impl_->is_driver(); }
@@ -120,7 +118,7 @@ Worker::estimate_kv_cache_capacity_async() {
 }
 
 folly::SemiFuture<std::optional<ForwardOutput>> Worker::step_async(
-    const BatchedForwardInputs& inputs) {
+    const ForwardInput& inputs) {
   return impl_->step_async(inputs);
 }
 
@@ -130,8 +128,9 @@ folly::SemiFuture<folly::Unit> Worker::process_group_test_async() {
 
 // initialize model, cache manager. async call
 folly::SemiFuture<bool> Worker::init_model_async(
-    const std::string& model_weights_path) {
-  return impl_->init_model_async(model_weights_path);
+    const std::string& model_weights_path,
+    int32_t random_seed) {
+  return impl_->init_model_async(model_weights_path, random_seed);
 }
 
 folly::SemiFuture<bool> Worker::allocate_kv_cache_async(

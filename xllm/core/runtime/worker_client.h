@@ -40,7 +40,8 @@ class WorkerClient {
   virtual ~WorkerClient() = default;
 
   // initialize model, cache manager. blocking call
-  virtual bool init_model(const std::string& model_weights_path);
+  virtual bool init_model(const std::string& model_weights_path,
+                          int32_t random_seed);
 
   virtual std::tuple<int64_t, int64_t> estimate_kv_cache_capacity();
 
@@ -82,7 +83,8 @@ class WorkerClient {
 
   // initialize model, cache manager. async call
   virtual folly::SemiFuture<bool> init_model_async(
-      const std::string& model_weights_path);
+      const std::string& model_weights_path,
+      int32_t random_seed);
 
   virtual folly::SemiFuture<std::tuple<int64_t, int64_t>>
   estimate_kv_cache_capacity_async();
@@ -126,7 +128,7 @@ class WorkerClient {
 
   // for multi-node serving, we pass an non-tensor params to remote workers.
   virtual folly::SemiFuture<std::optional<RawForwardOutput>> step_async(
-      const std::vector<RawForwardInput>& inputs);
+      const RawForwardInput& inputs);
 
   virtual folly::SemiFuture<folly::Unit> process_group_test_async();
 

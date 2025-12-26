@@ -28,7 +28,6 @@ limitations under the License.
 #include "framework/chat_template/jinja_chat_template.h"
 #include "framework/model/model_args.h"
 #include "framework/request/mm_data.h"
-#include "framework/request/mm_input_helper.h"
 #include "framework/request/request.h"
 #include "models/model_registry.h"
 #include "runtime/speculative_engine.h"
@@ -78,7 +77,8 @@ VLMMaster::VLMMaster(const Options& options)
       .disable_ttft_profiling(options_.disable_ttft_profiling())
       .enable_forward_interruption(options_.enable_forward_interruption())
       // TODO: support later for VLM.
-      .enable_schedule_overlap(false);
+      .enable_schedule_overlap(false)
+      .server_idx(options_.server_idx());
   scheduler_ = create_continuous_scheduler(engine_.get(), scheduler_options);
 
   if (options_.enable_service_routing()) {
@@ -126,7 +126,7 @@ VLMMaster::~VLMMaster() {
 
 void VLMMaster::handle_request(const std::string& prompt,
                                const MMData& mm_data,
-                               RequestParams sp,
+                               const RequestParams& sp,
                                OutputCallback callback) {
   scheduler_->incr_pending_requests(1);
   auto cb = [callback = std::move(callback),
@@ -165,20 +165,8 @@ void VLMMaster::handle_request(const std::string& prompt,
 }
 
 void VLMMaster::handle_request(const std::vector<Message>& messages,
-                               const MMInput& mm_inputs,
-                               RequestParams sp,
-                               OutputCallback callback) {
-  MMData mm_data;
-  if (!mm_inputs.empty() && !image_processor_->process(mm_inputs, mm_data)) {
-    LOG(ERROR) << " image processor process failed";
-  }
-
-  this->handle_request(messages, mm_data, sp, callback);
-}
-
-void VLMMaster::handle_request(const std::vector<Message>& messages,
                                const MMData& mm_data,
-                               RequestParams sp,
+                               const RequestParams& sp,
                                OutputCallback callback) {
   scheduler_->incr_pending_requests(1);
   auto cb = [callback = std::move(callback),
@@ -214,19 +202,27 @@ void VLMMaster::handle_request(const std::vector<Message>& messages,
   });
 }
 
-void VLMMaster::handle_request(const std::vector<MMChatMessage>& raw_input_data,
-                               RequestParams sp,
+void VLMMaster::handle_request(const std::vector<Message>& messages,
+                               const RequestParams& sp,
                                OutputCallback callback) {
-  static MMInputHelper helper;
-  std::vector<Message> messages;
+  static MMInputTransfer helper;
   MMInput mm_inputs;
-
-  if (!helper.trans(raw_input_data, messages, mm_inputs.items_)) {
-    LOG(ERROR) << "MMInputHelper trans failed, ingnore this input.";
+  if (!helper.trans(messages, mm_inputs)) {
+    LOG(ERROR) << "mm input helper trans failed.";
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "MM input transfer trans failed.");
     return;
   }
 
-  handle_request(std::move(messages), std::move(mm_inputs), sp, callback);
+  MMData mm_data;
+  if (!mm_inputs.empty() && !image_processor_->process(mm_inputs, mm_data)) {
+    LOG(ERROR) << " image processor process failed.";
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "Image processor process failed.");
+    return;
+  }
+
+  this->handle_request(messages, mm_data, sp, callback);
 }
 
 void VLMMaster::handle_batch_request(const std::vector<std::string>& prompts,
@@ -355,6 +351,7 @@ std::shared_ptr<Request> VLMMaster::generate_request(std::string prompt,
   sampling_param.top_k = sp.top_k;
   sampling_param.logprobs = sp.logprobs;
   sampling_param.top_logprobs = sp.top_logprobs;
+  sampling_param.is_embeddings = sp.is_embeddings;
   if (best_of > sp.n) {
     // enable logprobs for best_of to generate sequence logprob
     sampling_param.logprobs = true;

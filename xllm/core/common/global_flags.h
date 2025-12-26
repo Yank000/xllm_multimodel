@@ -87,6 +87,8 @@ DECLARE_bool(enable_acl_graph);
 
 DECLARE_int32(max_seq_len_for_graph_mode);
 
+DECLARE_bool(enable_acl_graph_no_padding);
+
 DECLARE_bool(enable_chunked_prefill);
 
 DECLARE_string(master_node_addr);
@@ -210,3 +212,23 @@ DECLARE_bool(enable_shm);
 DECLARE_bool(enable_prefetch_weight);
 
 DECLARE_int32(flashinfer_workspace_buffer_size);
+
+DECLARE_bool(enable_dp_balance);
+
+DECLARE_int32(random_seed);
+
+DECLARE_string(dit_cache_policy);
+
+DECLARE_int64(dit_cache_warmup_steps);
+
+DECLARE_int64(dit_cache_n_derivatives);
+
+DECLARE_int64(dit_cache_skip_interval_steps);
+
+DECLARE_double(dit_cache_residual_diff_threshold);
+
+DECLARE_bool(enable_constrained_decoding);
+
+#if defined(USE_NPU)
+DECLARE_string(npu_kernel_backend);
+#endif

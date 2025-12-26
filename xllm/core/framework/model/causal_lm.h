@@ -36,6 +36,43 @@ limitations under the License.
 
 namespace xllm {
 
+namespace detail {
+template <typename T, typename = void>
+struct has_get_lm_head : std::false_type {};
+
+template <typename T>
+struct has_get_lm_head<T,
+                       std::void_t<decltype(std::declval<T>()->get_lm_head())>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_set_lm_head : std::false_type {};
+
+template <typename T>
+struct has_set_lm_head<T,
+                       std::void_t<decltype(std::declval<T>()->set_lm_head(
+                           std::declval<layer::LmHead&>()))>> : std::true_type {
+};
+
+template <typename T, typename = void>
+struct has_get_word_embedding : std::false_type {};
+
+template <typename T>
+struct has_get_word_embedding<
+    T,
+    std::void_t<decltype(std::declval<T>()->get_word_embedding())>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_set_word_embedding : std::false_type {};
+
+template <typename T>
+struct has_set_word_embedding<
+    T,
+    std::void_t<decltype(std::declval<T>()->set_word_embedding(
+        std::declval<layer::WordEmbedding&>()))>> : std::true_type {};
+}  // namespace detail
+
 class CausalLM : public torch::nn::Module {
  public:
   ~CausalLM() override = default;
@@ -43,11 +80,10 @@ class CausalLM : public torch::nn::Module {
   // tokens: [num_tokens]
   // positions: [num_tokens]
   // returns: [num_tokens, hidden_size]
-  virtual torch::Tensor forward(
-      const std::vector<torch::Tensor>& tokens,
-      const std::vector<torch::Tensor>& positions,
-      std::vector<KVCache>& kv_caches,
-      const std::vector<ModelInputParams>& parameters) = 0;
+  virtual torch::Tensor forward(const torch::Tensor& tokens,
+                                const torch::Tensor& positions,
+                                std::vector<KVCache>& kv_caches,
+                                const ModelInputParams& parameters) = 0;
 
   // hidden_states: [num_tokens, hidden_size]
   // seleted_idxes: [num_tokens]
@@ -66,11 +102,23 @@ class CausalLM : public torch::nn::Module {
 
   virtual const torch::TensorOptions& options() const = 0;
 
-  virtual layer::LmHead get_lm_head() = 0;
-  virtual void set_lm_head(layer::LmHead& head) = 0;
-  virtual std::vector<layer::WordEmbedding> get_word_embedding() = 0;
-  virtual void set_word_embedding(
-      std::vector<layer::WordEmbedding>& embedding) = 0;
+  // MTP-specific interface.
+  virtual layer::LmHead get_lm_head() {
+    LOG(FATAL)
+        << "Method 'get_lm_head' is not implemented/supported by this model.";
+  }
+  virtual void set_lm_head(layer::LmHead& head) {
+    LOG(FATAL)
+        << "Method 'set_lm_head' is not implemented/supported by this model.";
+  }
+  virtual layer::WordEmbedding get_word_embedding() {
+    LOG(FATAL) << "Method 'get_word_embedding' is not implemented/supported by "
+                  "this model.";
+  }
+  virtual void set_word_embedding(layer::WordEmbedding& embedding) {
+    LOG(FATAL) << "Method 'set_word_embedding' is not implemented/supported by "
+                  "this model.";
+  }
 };
 
 template <typename Model>
@@ -79,11 +127,10 @@ class CausalLMImpl : public CausalLM {
   CausalLMImpl(Model model, const torch::TensorOptions& options)
       : model_(std::move(model)), options_(options) {}
 
-  torch::Tensor forward(
-      const std::vector<torch::Tensor>& tokens,
-      const std::vector<torch::Tensor>& positions,
-      std::vector<KVCache>& kv_caches,
-      const std::vector<ModelInputParams>& parameters) override {
+  torch::Tensor forward(const torch::Tensor& tokens,
+                        const torch::Tensor& positions,
+                        std::vector<KVCache>& kv_caches,
+                        const ModelInputParams& parameters) override {
     return model_->forward(tokens, positions, kv_caches, parameters);
   }
 
@@ -105,17 +152,36 @@ class CausalLMImpl : public CausalLM {
     return model_->update_expert_weight(layer_id);
   }
 
-  layer::LmHead get_lm_head() override { return model_->get_lm_head(); };
-
-  void set_lm_head(layer::LmHead& head) override { model_->set_lm_head(head); };
-
-  std::vector<layer::WordEmbedding> get_word_embedding() override {
-    return model_->get_word_embedding();
+  layer::LmHead get_lm_head() override {
+    if constexpr (detail::has_get_lm_head<Model>::value) {
+      return model_->get_lm_head();
+    } else {
+      return CausalLM::get_lm_head();
+    }
   };
 
-  void set_word_embedding(
-      std::vector<layer::WordEmbedding>& embedding) override {
-    model_->set_word_embedding(embedding);
+  void set_lm_head(layer::LmHead& head) override {
+    if constexpr (detail::has_set_lm_head<Model>::value) {
+      model_->set_lm_head(head);
+    } else {
+      CausalLM::set_lm_head(head);
+    }
+  };
+
+  layer::WordEmbedding get_word_embedding() override {
+    if constexpr (detail::has_get_word_embedding<Model>::value) {
+      return model_->get_word_embedding();
+    } else {
+      return CausalLM::get_word_embedding();
+    }
+  };
+
+  void set_word_embedding(layer::WordEmbedding& embedding) override {
+    if constexpr (detail::has_set_word_embedding<Model>::value) {
+      model_->set_word_embedding(embedding);
+    } else {
+      CausalLM::set_word_embedding(embedding);
+    }
   };
 
   torch::Device device() const override { return options_.device(); }

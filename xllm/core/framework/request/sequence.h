@@ -37,7 +37,14 @@ limitations under the License.
 
 namespace xllm {
 
-enum class SequenceStage : int8_t { PREFILL = 0, DECODE = 1 };
+enum class SequenceStage : int8_t {
+  // Prefill without using kv cache.
+  PREFILL = 0,
+  // Chunked prefill using kv cache.
+  CHUNKED_PREFILL = 1,
+  // Decode one token.
+  DECODE = 2
+};
 
 struct SequenceParams {
   // max tokens count in the sequence.
@@ -96,12 +103,17 @@ class Sequence final {
   }
 
   // check if in prefill stage
-  bool is_prefill_stage() const { return stage() == SequenceStage::PREFILL; }
+  bool is_chunked_prefill_stage() const {
+    return stage() == SequenceStage::CHUNKED_PREFILL;
+  }
+
   // get the sequence stage
   SequenceStage stage() const {
-    if ((kv_state_.kv_cache_tokens_num() <
-         std::max(volatile_num_prompt_tokens_, num_prompt_tokens())) &&
-        kv_state_.kv_cache_tokens_num() > 0) {
+    if (kv_state_.kv_cache_tokens_num() <
+        std::max(volatile_num_prompt_tokens_, num_prompt_tokens())) {
+      if (kv_state_.kv_cache_tokens_num() > 0) {
+        return SequenceStage::CHUNKED_PREFILL;
+      }
       return SequenceStage::PREFILL;
     }
     return SequenceStage::DECODE;
@@ -251,6 +263,10 @@ class Sequence final {
   // get sequence id
   int32_t seq_id() const { return seq_id_; }
 
+  void set_cancel() { cancelled_.store(true, std::memory_order_relaxed); }
+
+  bool cancelled() const { return cancelled_.load(std::memory_order_relaxed); }
+
  private:
   // the index of the sequence in the request
   size_t index_ = 0;
@@ -339,6 +355,8 @@ class Sequence final {
   // update stage, we pop the state from the queue.
   // 2 valid elements at most, maximum 2 steps pre scheduled.
   std::queue<bool> is_pre_scheduled_step_prefill_;
+
+  std::atomic<bool> cancelled_{false};
 
   // kvcache store copy async result
   std::atomic<bool> termination_flag_{false};

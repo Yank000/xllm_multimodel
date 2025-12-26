@@ -4,39 +4,39 @@ cc_library(
   NAME
     common_layers
   HDRS
-    flashinfer_workspace.h
-    deepseek_v2_attention.h
     qwen2_attention.h
-    attention.h
-    fuse_norm.h
+    qwen2_vision_attention.h
+    rms_norm.h
     rotary_embedding.h
+    rotary_embedding_util.h
     fused_moe.h
     dense_mlp.h
     qwen2_decoder_layer.h
+    qwen2_5_vision_layer.h
     qwen3_moe_decoder_layer.h
     linear.h
     word_embedding_impl.h
     layer_utils.h
     indexer.h
-    deepseek_v2_attention.h
-    deepseek_v2_decoder_layer.h
+    deep_ep.h
+    activation.h
   SRCS
-    flashinfer_workspace.cpp
-    deepseek_v2_attention.cpp
     qwen2_attention.cpp
-    attention.cpp
-    fuse_norm.cpp
+    qwen2_vision_attention.cpp
+    rms_norm.cpp
     rotary_embedding.cpp
+    rotary_embedding_util.cpp
     fused_moe.cpp
     dense_mlp.cpp
     qwen2_decoder_layer.cpp
+    qwen2_5_vision_layer.cpp
     qwen3_moe_decoder_layer.cpp
     linear.cpp
     word_embedding_impl.cpp
     layer_utils.cpp
     indexer.cpp
-    deepseek_v2_attention.cpp
-    deepseek_v2_decoder_layer.cpp
+    deep_ep.cpp
+    activation.cpp
   DEPS
     "-Wl,--whole-archive"
     "-Wl,--no-whole-archive"

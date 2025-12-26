@@ -70,26 +70,48 @@ std::optional<std::string> JinjaChatTemplate::apply(
 
     if (std::holds_alternative<std::string>(message.content)) {
       message_json["content"] = std::get<std::string>(message.content);
-    } else if (std::holds_alternative<Message::MMContentVec>(message.content)) {
+    } else if (std::holds_alternative<MMContentVec>(message.content)) {
       message_json["content"] =
-          get_mm_content(std::get<Message::MMContentVec>(message.content));
+          get_mm_content(std::get<MMContentVec>(message.content));
     }
 
-    messages_json.push_back(message_json);
+    if (message.tool_call_id.has_value()) {
+      message_json["tool_call_id"] = *message.tool_call_id;
+    }
+
+    if (message.reasoning_content.has_value()) {
+      message_json["reasoning_content"] = *message.reasoning_content;
+    }
+
+    if (message.tool_calls.has_value()) {
+      nlohmann::ordered_json tool_calls_json = nlohmann::json::array();
+      const auto& tool_calls = *message.tool_calls;
+
+      for (const auto& tool_call : tool_calls) {
+        tool_calls_json.emplace_back(nlohmann::ordered_json{
+            {"id", tool_call.id},
+            {"type", tool_call.type},
+            {"function",
+             nlohmann::ordered_json{
+                 {"name", tool_call.function.name},
+                 {"arguments", tool_call.function.arguments}}}});
+      }
+      message_json["tool_calls"] = std::move(tool_calls_json);
+    }
+
+    messages_json.emplace_back(std::move(message_json));
   }
 
   nlohmann::ordered_json tools_json = nlohmann::json::array();
+
   for (const auto& json_tool : json_tools) {
-    nlohmann::ordered_json tool_json;
-    tool_json["type"] = json_tool.type;
-
-    nlohmann::ordered_json function_json;
-    function_json["name"] = json_tool.function.name;
-    function_json["description"] = json_tool.function.description;
-    function_json["parameters"] = json_tool.function.parameters;
-
-    tool_json["function"] = function_json;
-    tools_json.push_back(tool_json);
+    tools_json.emplace_back(nlohmann::ordered_json{
+        {"type", json_tool.type},
+        {"function",
+         nlohmann::ordered_json{
+             {"name", json_tool.function.name},
+             {"description", json_tool.function.description},
+             {"parameters", json_tool.function.parameters}}}});
   }
   // apply the template
   return apply(messages_json, tools_json, chat_template_kwargs);
@@ -110,7 +132,7 @@ std::optional<std::string> JinjaChatTemplate::apply(
 }
 
 nlohmann::ordered_json JinjaChatTemplate::get_mm_content(
-    const Message::MMContentVec& vec) const {
+    const MMContentVec& vec) const {
   nlohmann::ordered_json content_json = nlohmann::json::array();
 
   for (const auto& item : vec) {
@@ -119,6 +141,15 @@ nlohmann::ordered_json JinjaChatTemplate::get_mm_content(
 
     if (item.type == "text") {
       item_json["text"] = item.text;
+    } else if (item.type == "video_url") {
+      item_json["video"] = "mm place holder";
+      item_json["video_url"] = "mm place holder";
+    } else if (item.type == "image_url") {
+      item_json["image"] = "mm place holder";
+      item_json["image_url"] = "mm place holder";
+    } else if (item.type == "audio_url") {
+      item_json["audio"] = "mm place holder";
+      item_json["audio_url"] = "mm place holder";
     } else {
       item_json[item.type] = "mm place holder";
     }

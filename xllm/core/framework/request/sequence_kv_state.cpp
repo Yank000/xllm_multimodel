@@ -58,7 +58,6 @@ void KVCacheState::add_shared_kv_blocks(std::vector<Block>&& blocks,
   if (blocks.empty()) {
     return;
   }
-
   // The number of matched blocks may be fewer than the number of blocks held by
   // the sequence itself. In this case, try to replace the blocks computed by
   // the sequence with blocks from the prefix_cache and release the computed
@@ -86,6 +85,10 @@ void KVCacheState::add_shared_kv_blocks(std::vector<Block>&& blocks,
     CHECK_GT(block_size, 0);
     num_shared_tokens =
         ((current_total_num_tokens - 1) / block_size) * block_size;
+    if (num_owned_shared_blocks_ > 0) {
+      num_owned_shared_blocks_--;
+      blocks_.pop_back();
+    }
   }
   CHECK_LT(num_shared_tokens, current_total_num_tokens);
   // update the kv cache position
@@ -140,14 +143,13 @@ void KVCacheState::reset() {
   transfer_kv_info_.reset();
 }
 
-void KVCacheState::process_beam_search(const std::vector<Block>& new_blocks) {
+void KVCacheState::process_beam_search(std::optional<Block> new_block) {
   blocks_.clear();
   blocks_ = std::move(src_blocks_);
 
-  if (!new_blocks.empty()) {
-    CHECK_EQ(new_blocks.size(), 1);
+  if (new_block.has_value()) {
     blocks_.pop_back();
-    blocks_.insert(blocks_.end(), new_blocks.begin(), new_blocks.end());
+    blocks_.emplace_back(new_block.value());
   }
 }
 

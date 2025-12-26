@@ -29,8 +29,12 @@ limitations under the License.
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
-#include "layers/common/attention.h"
-#include "layers/common/deepseek_v2_decoder_layer.h"
+#if defined(USE_MLU)
+#include "layers/mlu/attention.h"
+#include "layers/mlu/deepseek_v2_decoder_layer_impl.h"
+#elif defined(USE_CUDA)
+#include "layers/cuda/attention.h"
+#endif
 #include "layers/common/tests/tests_utils.h"
 #include "platform/device.h"
 
@@ -554,8 +558,8 @@ TEST_F(DeepseekV2DecoderLayerTest,
        ConstructorRegistersExpectedSubmodules_FirstLayer) {
   // layer_id < first_k_dense_replace → Dense MLP path inside decoder
   int32_t layer_id = 0;
-  auto decoder = torch::nn::ModuleHolder<DeepseekV2DecoderImpl>(
-      DeepseekV2DecoderImpl(context_, layer_id));
+  auto decoder = torch::nn::ModuleHolder<DeepseekV2DecoderLayerImpl>(
+      DeepseekV2DecoderLayerImpl(context_, layer_id));
 
   auto child_names = GetChildModuleNames(*decoder);
   // Core components should be registered with these names (see implementation)
@@ -571,8 +575,8 @@ TEST_F(DeepseekV2DecoderLayerTest,
        ConstructorRegistersExpectedSubmodules_DenseLayer) {
   // layer_id >= first_k_dense_replace → MoE path inside decoder
   int32_t layer_id = std::max<int32_t>(5, model_args_.first_k_dense_replace());
-  auto decoder = torch::nn::ModuleHolder<DeepseekV2DecoderImpl>(
-      DeepseekV2DecoderImpl(context_, layer_id));
+  auto decoder = torch::nn::ModuleHolder<DeepseekV2DecoderLayerImpl>(
+      DeepseekV2DecoderLayerImpl(context_, layer_id));
 
   auto child_names = GetChildModuleNames(*decoder);
   EXPECT_TRUE(child_names.count("self_attn"));
@@ -584,8 +588,8 @@ TEST_F(DeepseekV2DecoderLayerTest,
 TEST_F(DeepseekV2DecoderLayerTest, LoadStateDictTest_DenseMLP) {
   // Test loading weights into the decoder layer with Dense MLP
   int32_t layer_id = 0;  // < first_k_dense_replace, uses Dense MLP
-  auto decoder = torch::nn::ModuleHolder<DeepseekV2DecoderImpl>(
-      DeepseekV2DecoderImpl(context_, layer_id));
+  auto decoder = torch::nn::ModuleHolder<DeepseekV2DecoderLayerImpl>(
+      DeepseekV2DecoderLayerImpl(context_, layer_id));
 
   // Create test weights
   auto weight_dict = CreateTestWeights(layer_id);
@@ -599,8 +603,8 @@ TEST_F(DeepseekV2DecoderLayerTest, LoadStateDictTest_DenseMLP) {
 TEST_F(DeepseekV2DecoderLayerTest, LoadStateDictTest_FusedMoE) {
   // Test loading weights into the decoder layer with FusedMoE
   int32_t layer_id = std::max<int32_t>(5, model_args_.first_k_dense_replace());
-  auto decoder = torch::nn::ModuleHolder<DeepseekV2DecoderImpl>(
-      DeepseekV2DecoderImpl(context_, layer_id));
+  auto decoder = torch::nn::ModuleHolder<DeepseekV2DecoderLayerImpl>(
+      DeepseekV2DecoderLayerImpl(context_, layer_id));
 
   // Create test weights
   auto weight_dict = CreateTestWeights(layer_id);
@@ -624,8 +628,8 @@ TEST_F(DeepseekV2DecoderLayerTest,
   context_ = ModelContext(parallel_args_, model_args_, quant_args_, options_);
 
   // Create decoder with custom dimensions
-  auto decoder = torch::nn::ModuleHolder<DeepseekV2DecoderImpl>(
-      DeepseekV2DecoderImpl(context_, layer_id));
+  auto decoder = torch::nn::ModuleHolder<DeepseekV2DecoderLayerImpl>(
+      DeepseekV2DecoderLayerImpl(context_, layer_id));
 
   // Create test weights with custom dimensions
   auto weight_dict = CreateTestWeights(layer_id);
@@ -720,8 +724,13 @@ TEST_F(DeepseekV2DecoderLayerTest,
       torch::zeros({block_num, 1, block_size, index_head_dim}, options_);
   KVCache kv_cache(k_cache, torch::Tensor(), index_cache);
 
-  auto output = decoder->forward(
-      hidden_states, positions, attn_metadata, kv_cache, input_params);
+  std::optional<torch::Tensor> residual = std::nullopt;
+  auto output = decoder->forward(hidden_states,
+                                 residual,
+                                 positions,
+                                 attn_metadata,
+                                 kv_cache,
+                                 input_params);
 
   // Synchronize device stream
   xllm::Device device(options_.device());
@@ -764,8 +773,8 @@ TEST_F(DeepseekV2DecoderLayerTest, SmoothquantPrecisionVerificationTest_MoE) {
   context_ = ModelContext(parallel_args_, model_args_, quant_args_, options_);
 
   // Create decoder with custom dimensions
-  auto decoder = torch::nn::ModuleHolder<DeepseekV2DecoderImpl>(
-      DeepseekV2DecoderImpl(context_, layer_id));
+  auto decoder = torch::nn::ModuleHolder<DeepseekV2DecoderLayerImpl>(
+      DeepseekV2DecoderLayerImpl(context_, layer_id));
 
   // Create test weights with custom dimensions
   auto weight_dict = CreateTestWeights(layer_id);
@@ -860,8 +869,13 @@ TEST_F(DeepseekV2DecoderLayerTest, SmoothquantPrecisionVerificationTest_MoE) {
       torch::zeros({block_num, 1, block_size, index_head_dim}, options_);
   KVCache kv_cache(k_cache, torch::Tensor(), index_cache);
 
-  auto output = decoder->forward(
-      hidden_states, positions, attn_metadata, kv_cache, input_params);
+  std::optional<torch::Tensor> residual = std::nullopt;
+  auto output = decoder->forward(hidden_states,
+                                 residual,
+                                 positions,
+                                 attn_metadata,
+                                 kv_cache,
+                                 input_params);
 
   // Synchronize device stream
   xllm::Device device(options_.device());

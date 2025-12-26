@@ -177,19 +177,15 @@ void proto_to_forward_input(const proto::ForwardInput* pb_forward_input,
   forward_inputs.acc_logprob = torch::tensor(
       acc_logprob_vec,
       torch::dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(true));
-  std::pair<int, int> decode_seq_range{0, 0};
-#if defined(USE_NPU)
-  if (q_seq_lens.size() >= 1) {
-    decode_seq_range = util::find_ones_indices(q_seq_lens);
-  }
-#endif
+
   auto& input_params = forward_inputs.input_params;
   input_params.empty_kv_cache = pb_forward_input->empty_kv_cache();
   input_params.global_empty_kv_cache =
       pb_forward_input->global_empty_kv_cache();
+  input_params.batch_forward_type =
+      BatchForwardType(pb_forward_input->batch_forward_type());
   input_params.num_sequences = block_tables_vec.size();
   assert(input_params.num_sequences == pb_forward_input->num_sequences());
-  input_params.prefill_seq_len = pb_forward_input->prefill_seq_len();
   input_params.kv_max_seq_len = pb_forward_input->max_seq_len();
   input_params.q_max_seq_len = pb_forward_input->q_max_seq_len();
   input_params.kv_seq_lens = torch::tensor(seq_lens, tensor_options);
@@ -205,7 +201,6 @@ void proto_to_forward_input(const proto::ForwardInput* pb_forward_input,
 
   input_params.new_cache_slots =
       torch::tensor(new_token_slot_ids, tensor_options);
-  input_params.decode_seq_range = decode_seq_range;
 
   util::pad_2d_vector(block_tables_vec, /*pad_value=*/0);
   input_params.block_tables =
@@ -236,8 +231,7 @@ void proto_to_forward_input(const proto::ForwardInput* pb_forward_input,
     }
     torch::Tensor embeddings =
         create_2d_tensor(embeddings_vec, torch::kBFloat16);
-    input_params.mm_data =
-        MMData(MMType::EMBEDDING, {{"embedding", embeddings}});
+    input_params.input_embedding = embeddings;
   }
 
   CHECK_EQ(sampling_params.size(), selected_token_idxes.size());
@@ -325,6 +319,10 @@ void proto_to_forward_input(const proto::ForwardInput* pb_forward_input,
                            pb_forward_input->eplb_info().expert_ids().end());
   eplb_info.update_layer_id = pb_forward_input->eplb_info().update_layer_id();
 
+  if (pb_forward_input->has_mm_data()) {
+    util::proto_to_mmdata(pb_forward_input->mm_data(), &input_params.mm_data);
+  }
+
   COUNTER_ADD(proto_latency_seconds_proto2i, timer.elapsed_seconds());
 }
 
@@ -380,6 +378,7 @@ void forward_input_to_proto(const RawForwardInput& inputs,
                       inputs.unique_token_lens_vec);
   pb_forward_input->set_empty_kv_cache(inputs.empty_kv_cache);
   pb_forward_input->set_global_empty_kv_cache(inputs.global_empty_kv_cache);
+  pb_forward_input->set_batch_forward_type(inputs.batch_forward_type.value());
   pb_forward_input->set_max_seq_len(inputs.max_seq_len);
   pb_forward_input->set_q_max_seq_len(inputs.q_max_seq_len);
   ADD_VECTOR_TO_PROTO(pb_forward_input->mutable_seq_lens(), inputs.seq_lens);
@@ -452,7 +451,6 @@ void forward_input_to_proto(const RawForwardInput& inputs,
     *pb_forward_input->mutable_embeds()->Add() = embeds;
   }
 
-  pb_forward_input->set_prefill_seq_len(inputs.prefill_seq_len);
   ADD_VECTOR_TO_PROTO(pb_forward_input->mutable_embedding_ids(),
                       inputs.embedding_ids);
   ADD_VECTOR_TO_PROTO(pb_forward_input->mutable_extra_token_ids(),
@@ -472,6 +470,10 @@ void forward_input_to_proto(const RawForwardInput& inputs,
   ADD_VECTOR_TO_PROTO(pb_forward_input->mutable_dst_block_indices(),
                       inputs.dst_block_indices);
   ADD_VECTOR_TO_PROTO(pb_forward_input->mutable_cum_sum(), inputs.cum_sum);
+
+  if (inputs.mm_data.valid()) {
+    util::mmdata_to_proto(inputs.mm_data, pb_forward_input->mutable_mm_data());
+  }
 
   COUNTER_ADD(proto_latency_seconds_i2proto, timer.elapsed_seconds());
 }

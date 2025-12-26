@@ -31,6 +31,7 @@ limitations under the License.
 #include "framework/model/model_input_params.h"
 #include "framework/model_context.h"
 #include "framework/state_dict/state_dict.h"
+#include "loader/qwen3_decoder_manual_loader.h"
 #include "nlohmann/json.hpp"
 #include "npu_base_layer.h"
 #include "pytorch/adapter/utils/utils.h"
@@ -39,33 +40,27 @@ limitations under the License.
 #include "xllm_kernels/core/include/atb_speed/log.h"
 #include "xllm_kernels/core/include/atb_speed/utils/model_factory.h"
 #include "xllm_kernels/models/qwen3/layer/decoder_layer.h"
-
 namespace xllm {
 namespace layer {
 
-class NpuQwen3DecoderLayerImpl : public NpuBaseLayer {
+class Qwen3DecoderLayerImpl : public BaseLayer {
  public:
-  explicit NpuQwen3DecoderLayerImpl(const ModelContext& context);
+  explicit Qwen3DecoderLayerImpl(const ModelContext& context);
 
-  ~NpuQwen3DecoderLayerImpl() {};
-
-  virtual void load_state_dict(const StateDict& state_dict) override;
-
-  virtual void verify_loaded_weights() const override;
+  ~Qwen3DecoderLayerImpl() {};
 
   virtual void merge_loaded_weights() override;
 
   virtual int64_t init_layer() override;
 
-  torch::Tensor forward(std::vector<torch::Tensor>& x,
-                        std::vector<torch::Tensor>& cos_pos,
-                        std::vector<torch::Tensor>& sin_pos,
-                        std::vector<torch::Tensor>& attn_mask,
+  torch::Tensor forward(torch::Tensor& x,
+                        torch::Tensor& cos_pos,
+                        torch::Tensor& sin_pos,
+                        torch::Tensor& attn_mask,
                         KVCache& kv_cache,
-                        std::vector<ModelInputParams>& input_params,
-                        std::vector<aclrtEvent*> event = {nullptr, nullptr},
-                        std::vector<std::atomic<bool>*> event_flag = {nullptr,
-                                                                      nullptr},
+                        ModelInputParams& input_params,
+                        aclrtEvent* event = nullptr,
+                        std::atomic<bool>* event_flag = nullptr,
                         int node_id = 0);
 
  private:
@@ -75,12 +70,12 @@ class NpuQwen3DecoderLayerImpl : public NpuBaseLayer {
                        bool isPrefill);
 
   void build_node_variant_pack(atb_speed::Model::Node& node,
-                               std::vector<torch::Tensor>& x,
-                               std::vector<torch::Tensor>& cos_pos,
-                               std::vector<torch::Tensor>& sin_pos,
-                               std::vector<torch::Tensor>& attn_mask,
+                               torch::Tensor& x,
+                               torch::Tensor& cos_pos,
+                               torch::Tensor& sin_pos,
+                               torch::Tensor& attn_mask,
                                KVCache& kv_cache,
-                               std::vector<ModelInputParams>& input_params,
+                               ModelInputParams& input_params,
                                bool is_prefill);
 
   void initialize_quantization_parameters(
@@ -97,11 +92,7 @@ class NpuQwen3DecoderLayerImpl : public NpuBaseLayer {
   atb_speed::qwen::QwenLayerParam prefill_param_;
   atb_speed::qwen::QwenLayerParam decode_param_;
   atb::Tensor internal_tensors_;
-  atb::Tensor internal_tensors_auxiliary;
   atb::Tensor placeholder_;
-  torch::Tensor int_tensor_placeholder_;
-  torch::Tensor block_tables_placeholder_;
-  torch::Tensor slot_tensor_placeholder_;
 
   at::Tensor decode_attn_mask_;
 

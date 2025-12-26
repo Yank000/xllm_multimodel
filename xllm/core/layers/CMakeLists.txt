@@ -4,34 +4,26 @@ if(USE_NPU)
   include_directories(
     ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
   )
+  add_subdirectory(npu)
+else()
+  add_subdirectory(common)
+  if(USE_MLU)
+    add_subdirectory(mlu)
+  elseif(USE_ILU)
+    add_subdirectory(ilu)
+  else()
+    add_subdirectory(cuda)
+  endif()
+
 endif()
 
 cc_library(
   NAME
-    rotary_embedding
+    attention_mask
   HDRS
-    rotary_embedding.h
+    common/attention_mask.h
   SRCS
-    rotary_embedding.cpp
-  DEPS
-    :state_dict
-    :block
-    :kv_cache
-    :prefix_cache
-    glog::glog
-    gflags::gflags
-    torch
-)
-
-cc_library(
-  NAME
-    base_layer
-  HDRS
-    attention_mask.h
-    base_layer.h
-  SRCS
-    attention_mask.cpp
-    base_layer.cpp
+    common/attention_mask.cpp
   DEPS
     :state_dict
     :block
@@ -46,38 +38,35 @@ cc_library(
   NAME
     layers
   HDRS
-    column_parallel_linear.h
+    config.h
     deepseek_v2_decoder_layer.h
+    glm4_vision_encode_layer.h
     llama_decoder_layer.h
-    multi_head_attention.h
+    common/multi_head_attention.h
     qwen2_decoder_layer.h
-    qwen2dot5_vision_decode_layer.h
+    qwen2dot5_vision_encode_layer.h
     qwen3_vision_encode_layer.h
     qwen3_decoder_layer.h
     qwen3_moe_decoder_layer.h
-    rms_norm.h
+    glm4_decoder_layer.h
     siglip_encoder_layer.h
     pos_embedding.h
     word_embedding.h
     lm_head.h
-    block_copy.h
   SRCS
-    multi_head_attention.cpp
+    common/multi_head_attention.cpp
   DEPS
+    $<$<BOOL:${USE_NPU}>:npu_layers>
+    $<$<BOOL:${USE_MLU}>:mlu_layers>
+    $<$<BOOL:${USE_CUDA}>:cuda_layers>
+    $<$<BOOL:${USE_ILU}>:ilu_layers>
     :parallel_state
     :state_dict
     :kv_cache
     :prefix_cache
     :block
-    :base_layer
-    :rotary_embedding
+    :attention_mask
     glog::glog
     gflags::gflags
     torch
 )
-
-if(USE_NPU)
-  add_subdirectory(npu)
-else()
-  add_subdirectory(common)
-endif()

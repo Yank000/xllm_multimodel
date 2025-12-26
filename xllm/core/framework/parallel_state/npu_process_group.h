@@ -20,21 +20,25 @@ limitations under the License.
 
 namespace xllm {
 
-class ProcessGroupHCCL : public ProcessGroup {
+class ProcessGroupImpl : public ProcessGroup {
  public:
   // Constructor.
-  ProcessGroupHCCL(int rank,
+  ProcessGroupImpl(int rank,
                    int world_size,
                    const torch::Device& device,
                    HcclComm comm);
 
+  ProcessGroupImpl(int rank,
+                   int world_size,
+                   int rank_size,
+                   int port,
+                   bool trans,
+                   const std::string& host,
+                   const std::string& group_name,
+                   const torch::Device& device);
+
   // Destructor.
-  ~ProcessGroupHCCL() override;
-
-  void allreduce(torch::Tensor& input) override;
-
-  void allgather(const torch::Tensor& input,
-                 std::vector<torch::Tensor>& outputs) override;
+  ~ProcessGroupImpl() override;
 
  private:
   HcclComm comm_ = nullptr;

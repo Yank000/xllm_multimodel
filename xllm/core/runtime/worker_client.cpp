@@ -32,8 +32,9 @@ limitations under the License.
 
 namespace xllm {
 
-bool WorkerClient::init_model(const std::string& model_weights_path) {
-  return worker_->init_model(model_weights_path);
+bool WorkerClient::init_model(const std::string& model_weights_path,
+                              int32_t random_seed) {
+  return worker_->init_model(model_weights_path, random_seed);
 }
 
 bool WorkerClient::allocate_kv_cache(
@@ -104,15 +105,12 @@ WorkerClient::estimate_kv_cache_capacity_async() {
 }
 
 folly::SemiFuture<std::optional<ForwardOutput>> WorkerClient::step_async(
-    const ForwardInput& inputs) {
-  // TODO to adapt multi stream parallel later
-  BatchedForwardInputs batched_fwd_inputs;
-  batched_fwd_inputs.micro_inputs = {std::move(inputs)};
-  return worker_->step_async(batched_fwd_inputs);
+    const ForwardInput& input) {
+  return worker_->step_async(input);
 }
 
 folly::SemiFuture<std::optional<RawForwardOutput>> WorkerClient::step_async(
-    const std::vector<RawForwardInput>& inputs) {
+    const RawForwardInput& inputs) {
   LOG(ERROR) << "Worker Method step_async with RawForwardInput param is "
                 "UnImplemented.";
 }
@@ -123,8 +121,9 @@ folly::SemiFuture<folly::Unit> WorkerClient::process_group_test_async() {
 
 // initialize model, cache manager. async call
 folly::SemiFuture<bool> WorkerClient::init_model_async(
-    const std::string& model_weights_path) {
-  return worker_->init_model_async(model_weights_path);
+    const std::string& model_weights_path,
+    int32_t random_seed) {
+  return worker_->init_model_async(model_weights_path, random_seed);
 }
 
 folly::SemiFuture<bool> WorkerClient::allocate_kv_cache_async(

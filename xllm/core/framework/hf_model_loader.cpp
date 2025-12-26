@@ -25,10 +25,14 @@ limitations under the License.
 #include <filesystem>
 #include <vector>
 
+#include "core/common/version_singleton.h"
+#include "core/framework/state_dict/rec_vocab_dict.h"
 #include "core/framework/tokenizer/fast_tokenizer.h"
+#include "core/framework/tokenizer/rec_tokenizer.h"
 #include "core/framework/tokenizer/sentencepiece_tokenizer.h"
 #include "core/framework/tokenizer/tiktoken_tokenizer.h"
 #include "core/framework/tokenizer/tokenizer_factory.h"
+#include "core/util/blocking_counter.h"
 #include "core/util/json_reader.h"
 #include "models/model_registry.h"
 
@@ -50,6 +54,13 @@ HFModelLoader::HFModelLoader(const std::string& model_weights_path)
       << "Failed to find model weights files in " << model_weights_path;
   // sort the model weights files by name
   std::sort(model_weights_files_.begin(), model_weights_files_.end());
+
+  threadpool_ = std::make_unique<ThreadPool>(32);
+
+  if (FLAGS_backend == "rec") {
+    CHECK(load_rec_vocab(model_weights_path))
+        << "Failed to load rec content from " << model_weights_path;
+  }
 }
 
 std::unique_ptr<Tokenizer> HFModelLoader::tokenizer() const {
@@ -61,13 +72,43 @@ std::vector<std::unique_ptr<StateDict>>& HFModelLoader::get_state_dicts() {
   if (state_dicts_.empty()) {
     // load state dict
     state_dicts_.reserve(model_weights_files_.size());
-    for (auto& model_weights_file : model_weights_files_) {
-      LOG(INFO) << "Loading model weights from " << model_weights_file;
-      state_dicts_.emplace_back(
-          StateDictFromSafeTensor::load(model_weights_file));
+    auto file_cnt = model_weights_files_.size();
+    BlockingCounter counter(file_cnt);
+    state_dicts_.resize(model_weights_files_.size());
+    for (int file_id = 0; file_id < file_cnt; file_id++) {
+      threadpool_->schedule([this, file_id, &counter]() mutable {
+        LOG(INFO) << "Loading model weights from "
+                  << model_weights_files_[file_id];
+        state_dicts_[file_id] = std::move(
+            StateDictFromSafeTensor::load(model_weights_files_[file_id]));
+        counter.decrement_count();
+      });
     }
+    counter.wait();
   }
   return state_dicts_;
+}
+
+bool HFModelLoader::load_rec_vocab(const std::string& model_weights_path) {
+  if (!tokenizer_args_.vocab_file().empty()) {
+    std::filesystem::path path = model_weights_path;
+    std::string model_version = path.filename();
+    std::string vocab_full_path =
+        path.append(tokenizer_args_.vocab_file()).string();
+
+    LOG(INFO) << "Model_version: " << model_version
+              << ", vocab_full_path: " << vocab_full_path;
+
+    CHECK(nullptr != VersionSingleton<RecVocabDict>::GetInstance(model_version))
+        << "Failed to get vocab dict instance";
+    CHECK(VersionSingleton<RecVocabDict>::GetInstance(model_version)
+              ->initialize(vocab_full_path))
+        << "Failed to initialize vocab dict from " << vocab_full_path;
+  } else {
+    LOG(ERROR) << "Vocab file is not set";
+  }
+
+  return true;
 }
 
 bool HFModelLoader::load_args(const std::string& model_weights_path) {
@@ -88,6 +129,12 @@ bool HFModelLoader::load_args(const std::string& model_weights_path) {
 
   if (!load_image_preprocessor_args(model_weights_path)) {
     LOG(ERROR) << "Failed to load image preprocess args from "
+               << model_weights_path;
+    return false;
+  }
+
+  if (!load_video_preprocessor_args(model_weights_path)) {
+    LOG(ERROR) << "Failed to load video preprocess args from "
                << model_weights_path;
     return false;
   }
@@ -401,6 +448,48 @@ bool HFModelLoader::load_image_preprocessor_args(
 
     args_.mm_use_image_id() =
         image_preprocess_reader.value_or<bool>("use_image_id", false);
+  }
+
+  return true;
+}
+
+bool HFModelLoader::load_video_preprocessor_args(
+    const std::string& model_weights_path) {
+  // video preprocessor args
+  JsonReader video_preprocess_reader;
+  const std::string video_preprocess_file_path =
+      model_weights_path + "/video_preprocessor_config.json";
+  if (video_preprocess_reader.parse(video_preprocess_file_path)) {
+    LOG(INFO) << "Success to parse video preprocess args file: "
+              << video_preprocess_file_path;
+
+    args_.mm_video_shortest_edge() =
+        video_preprocess_reader.value_or<int>("size.shortest_edge", 0);
+
+    args_.mm_video_longest_edge() =
+        video_preprocess_reader.value_or<int>("size.longest_edge", 0);
+
+    const auto& video_prerocess_data = video_preprocess_reader.data();
+    if (video_preprocess_reader.contains("image_mean")) {
+      args_.mm_video_normalize_mean() =
+          video_prerocess_data["image_mean"].get<std::vector<double>>();
+    }
+
+    if (video_preprocess_reader.contains("image_std")) {
+      args_.mm_video_normalize_std() =
+          video_prerocess_data["image_std"].get<std::vector<double>>();
+    }
+    args_.mm_video_patch_size() =
+        video_preprocess_reader.value_or<int>("patch_size", 0);
+
+    args_.mm_video_temporal_patch_size() =
+        video_preprocess_reader.value_or<int>("temporal_patch_size", 0);
+
+    args_.mm_video_merge_size() =
+        video_preprocess_reader.value_or<int>("merge_size", 0);
+
+    args_.mm_video_do_rescale() =
+        video_preprocess_reader.value_or<bool>("do_rescale", false);
   }
 
   return true;

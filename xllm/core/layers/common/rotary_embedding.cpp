@@ -21,15 +21,18 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
+RotaryEmbeddingImpl::RotaryEmbeddingImpl(const ModelContext& context) {
+  LOG(FATAL) << "Not implement currently.";
+}
+
 RotaryEmbeddingImpl::RotaryEmbeddingImpl(int64_t rotary_dim,
                                          int64_t max_position_embeddings,
                                          int64_t rope_theta,
                                          bool interleaved,
                                          const torch::TensorOptions& options)
     : interleaved_(interleaved) {
-  auto inv_freq =
-      xllm::rotary::compute_inv_freq(rotary_dim, rope_theta, options);
-  const auto cos_sin = xllm::rotary::compute_cos_sin_cache(
+  auto inv_freq = rotary::compute_inv_freq(rotary_dim, rope_theta, options);
+  const auto cos_sin = rotary::compute_cos_sin_cache(
       rotary_dim, max_position_embeddings, interleaved, inv_freq, options);
   cos_sin_cache_ = register_buffer("cos_sin_cache", cos_sin);
 
@@ -48,7 +51,7 @@ void RotaryEmbeddingImpl::forward(torch::Tensor& q,
   std::optional<torch::Tensor> position_ids;
   if (is_prompt) {
     discrete = false;
-    if (Device::type_str() == "cuda") {
+    if (Device::type_str() == "cuda" || Device::type_str() == "npu") {
       position_ids = positions;
     }
   } else {
@@ -73,6 +76,61 @@ void RotaryEmbeddingImpl::forward(torch::Tensor& q,
   k = rotary_params.k;
 }
 
+MRotaryEmbeddingImpl::MRotaryEmbeddingImpl(
+    int64_t rotary_dim,
+    int64_t max_position_embeddings,
+    int64_t rope_theta,
+    bool interleaved,
+    const std::vector<int64_t>& rope_scaling_mrope_section,
+    const torch::TensorOptions& options)
+    : RotaryEmbeddingImpl(rotary_dim,
+                          max_position_embeddings,
+                          rope_theta,
+                          interleaved,
+                          options),
+      mrope_section_(rope_scaling_mrope_section) {
+  mrope_cu_seq_lens_ = torch::zeros(2, torch::kInt32).to(options.device());
+}
+
+void MRotaryEmbeddingImpl::forward(torch::Tensor& q,
+                                   torch::Tensor& k,
+                                   const torch::Tensor& positions,
+                                   const AttentionMetadata& attn_metadata) {
+  bool only_prefill =
+      (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill);
+  if (!only_prefill || mrope_section_.empty()) {
+    torch::Tensor position_ids = positions;
+    if (positions.dim() == 2) {
+      position_ids = positions[0];
+    }
+    return RotaryEmbeddingImpl::forward(q,
+                                        k,
+                                        position_ids,
+                                        attn_metadata.query_start_loc,
+                                        attn_metadata.max_query_len,
+                                        attn_metadata.is_prefill);
+  }
+
+  int64_t num_tokens = positions.size(-1);
+  mrope_cu_seq_lens_[1] = num_tokens;
+  CHECK(attn_metadata.mrope_cos.defined() && attn_metadata.mrope_sin.defined());
+  xllm::kernel::RotaryParams rotary_params;
+  rotary_params.q = q;
+  rotary_params.k = k;
+  rotary_params.sin = attn_metadata.mrope_sin;
+  rotary_params.cos = attn_metadata.mrope_cos;
+  rotary_params.cos_sin = get_cos_sin_cache();
+  rotary_params.position_ids = std::nullopt;
+  rotary_params.cu_query_lens = mrope_cu_seq_lens_;
+  rotary_params.interleaved = interleaved_;
+  rotary_params.discrete = false;
+  rotary_params.max_query_len = num_tokens;
+  xllm::kernel::apply_rotary(rotary_params);
+
+  q = rotary_params.q;
+  k = rotary_params.k;
+}
+
 DeepseekScalingRotaryEmbeddingImpl::DeepseekScalingRotaryEmbeddingImpl(
     int64_t head_size,
     int64_t rotary_dim,
@@ -91,7 +149,7 @@ DeepseekScalingRotaryEmbeddingImpl::DeepseekScalingRotaryEmbeddingImpl(
     : head_size_(head_size),
       rotary_dim_(rotary_dim),
       interleaved_(interleaved) {
-  auto inv_freq = xllm::rotary::apply_deepseek_yarn_rope_scaling(
+  auto inv_freq = rotary::apply_deepseek_yarn_rope_scaling(
       scaling_factor,
       extrapolation_factor,
       beta_fast,
@@ -99,16 +157,15 @@ DeepseekScalingRotaryEmbeddingImpl::DeepseekScalingRotaryEmbeddingImpl(
       rotary_dim,
       rope_theta,
       rope_scaling_original_max_position_embeddings);
-  const auto cos_sin =
-      xllm::rotary::compute_cos_sin_cache(rotary_dim,
-                                          max_position_embeddings,
-                                          interleaved,
-                                          scaling_factor,
-                                          attn_factor,
-                                          mscale,
-                                          mscale_all_dim,
-                                          inv_freq,
-                                          options);
+  const auto cos_sin = rotary::compute_cos_sin_cache(rotary_dim,
+                                                     max_position_embeddings,
+                                                     interleaved,
+                                                     scaling_factor,
+                                                     attn_factor,
+                                                     mscale,
+                                                     mscale_all_dim,
+                                                     inv_freq,
+                                                     options);
   cos_sin_cache_ = register_buffer("cos_sin_cache", cos_sin);
 
   auto cos_sin_vec = cos_sin_cache_.chunk(2, /*dim=*/-1);

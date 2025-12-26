@@ -31,7 +31,7 @@ void apply_rotary(torch::Tensor& q,
                   const torch::Tensor& sin,
                   const torch::Tensor& cos,
                   const std::optional<torch::Tensor>& position_ids,
-                  const torch::Tensor& cu_query_lens,
+                  const std::optional<torch::Tensor>& cu_query_lens,
                   bool interleaved,
                   bool discrete,
                   bool dynamic_ntk,
@@ -138,31 +138,89 @@ torch::Tensor matmul(const torch::Tensor& a,
                      double alpha,
                      double beta);
 
-torch::Tensor fused_moe(
-    const torch::Tensor& hidden_states,
-    const torch::Tensor& gating_output,
-    const torch::Tensor& w1,
-    const torch::Tensor& w2,
-    const std::optional<torch::Tensor>& bias1,
-    const std::optional<torch::Tensor>& bias2,
-    const std::optional<torch::Tensor>& residual,
-    const std::optional<torch::Tensor>& input_smooth,
-    const std::optional<torch::Tensor>& act_smooth,
-    const std::optional<torch::Tensor>& w1_scale,
-    const std::optional<torch::Tensor>& w2_scale,
-    const std::optional<torch::Tensor>& e_score_correction_bias,
+torch::Tensor group_gemm(const torch::Tensor& a,
+                         const torch::Tensor& b,
+                         const torch::Tensor& token_count,
+                         torch::Tensor& output,
+                         const std::optional<torch::Tensor>& a_scale,
+                         const std::optional<torch::Tensor>& b_scale,
+                         const std::optional<torch::List<int64_t>>& quant_flag,
+                         const int64_t max_dim,
+                         const bool trans_a,
+                         const bool trans_b,
+                         const int64_t a_quant_bit);
+
+std::tuple<torch::Tensor, torch::Tensor> moe_active_topk(
+    const torch::Tensor& input,
     int64_t topk,
-    bool renormalize,
-    bool gated,
-    const std::string& act_mode,
-    const std::string& scoring_func,
     int64_t num_expert_group,
     int64_t topk_group,
+    bool normalize,
+    const std::optional<torch::Tensor>& mask,
+    const std::string& normed_by,
+    const std::string& scoring_func,
     double route_scale,
+    const std::optional<torch::Tensor>& e_score_correction_bias);
+
+std::vector<torch::Tensor> moe_gen_idx(const torch::Tensor& expert_id,
+                                       int64_t expert_num);
+
+torch::Tensor moe_expand_input(
+    const torch::Tensor& input,
+    const torch::Tensor& gather_index,
+    const std::optional<torch::Tensor>& cusum_token_count,
     int64_t start_expert_id,
-    bool avg_moe,
-    const std::optional<torch::List<int64_t>>& w1_quant_flag,
-    const std::optional<torch::List<int64_t>>& w2_quant_flag);
+    int64_t expert_size);
+
+torch::Tensor moe_combine_result(
+    const torch::Tensor& input,
+    const torch::Tensor& reduce_weight,
+    const torch::Tensor& gather_ids,
+    const std::optional<torch::Tensor>& residual,
+    const std::optional<torch::Tensor>& cusum_token_count,
+    const int64_t start_expert_id,
+    const int64_t expert_size,
+    const std::optional<torch::Tensor>& bias);
+
+torch::Tensor moe_all2all_gen_send_layout(const torch::Tensor& token_count,
+                                          int64_t nrank);
+
+std::vector<torch::Tensor> moe_all2all_gen_gather_index(
+    const torch::Tensor& token_num,
+    int64_t pad_num,
+    bool return_cusum_token_count);
+
+std::vector<torch::Tensor> moe_all2all_create(int64_t dispatch_token_byte,
+                                              int64_t combine_token_byte,
+                                              int64_t max_expert_num,
+                                              int64_t max_token_num,
+                                              int64_t rank,
+                                              int64_t nrank,
+                                              const torch::Device& device);
+
+void moe_all2all_init(int64_t handle,
+                      const torch::Tensor& all_exchange_info,
+                      const torch::Device& device);
+
+void moe_all2all_dispatch(int64_t handle,
+                          int64_t token_byte,
+                          int64_t token_num,
+                          const torch::Tensor& send_layout,
+                          const torch::Tensor& send_token_num,
+                          const torch::Tensor& recv_layout,
+                          const torch::Tensor& recv_token_num,
+                          const std::optional<torch::Tensor>& send_token,
+                          const std::optional<torch::Tensor>& recv_token);
+
+void moe_all2all_combine(int64_t handle,
+                         int64_t token_byte,
+                         int64_t token_num,
+                         const torch::Tensor& send_src_layout,
+                         const torch::Tensor& send_dst_layout,
+                         const std::optional<torch::Tensor>& send_token,
+                         const std::optional<torch::Tensor>& recv_token);
+
+void moe_all2all_destroy(int64_t handle, const torch::Device& device);
 
 std::tuple<torch::Tensor, torch::Tensor> scaled_quantize(
     const torch::Tensor& x,
@@ -203,5 +261,11 @@ torch::Tensor apply_top_k_top_p(const torch::Tensor& logits,
                                 const torch::Tensor& topp_list);
 
 torch::Tensor random_sample(const torch::Tensor& probs);
+
+void gather_split(const torch::Tensor& input,
+                  const torch::Tensor& gather_index,
+                  const torch::Tensor& valid_token_num,
+                  const torch::Tensor& output_head,
+                  const torch::Tensor& output_tail);
 
 }  // namespace xllm::kernel::mlu

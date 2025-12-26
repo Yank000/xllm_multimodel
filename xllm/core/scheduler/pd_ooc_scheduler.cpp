@@ -57,6 +57,8 @@ PDOOCScheduler::PDOOCScheduler(Engine* engine, const Options& options)
   CHECK(options_.enable_pd_ooc());
   VLOG(1) << "Creating a PD OOC Scheduler";
 
+  server_name_ = "PDOOCServer";
+
   // PerfModel::PerfModel(double flop_s_gemm,
   // double flop_s_attn,
   // double memory_bw_byte_s_gemm,
@@ -96,12 +98,14 @@ PDOOCScheduler::PDOOCScheduler(Engine* engine, const Options& options)
         &PDOOCScheduler::decode_send_pull_signal, this);
   }
 
+  server_name_.append(std::to_string(options.server_idx()));
+
   // Start RPC server thread (must be done in subclass constructor to ensure
   // PDOOCScheduler::start_rpc_server is called, not the base class version)
   rpc_server_thread_ =
       std::make_unique<std::thread>(&PDOOCScheduler::start_rpc_server, this);
-  initialize_rpc_server_and_client("PDOOCServer");
-  register_instance_info("PDOOCServer", engine);
+  initialize_rpc_server_and_client(server_name_);
+  register_instance_info(server_name_, engine);
 }
 
 PDOOCScheduler::~PDOOCScheduler() {
@@ -115,13 +119,21 @@ PDOOCScheduler::~PDOOCScheduler() {
   if (send_pull_signal_thread_ && send_pull_signal_thread_->joinable()) {
     send_pull_signal_thread_->join();
   }
+
+  LOG(INFO) << "Stop scheduler rpc server " << server_name_ << ".";
+  auto rpc_server = ServerRegistry::get_instance().get_server(server_name_);
+  if (rpc_server != nullptr) {
+    rpc_server->stop();
+
+    ServerRegistry::get_instance().unregister_server(server_name_);
+  }
 }
 
 void PDOOCScheduler::start_rpc_server() {
   std::unique_ptr<PDOOCService> service =
       std::make_unique<PDOOCService>(this, engine_);
   auto rpc_server =
-      ServerRegistry::get_instance().register_server("PDOOCServer");
+      ServerRegistry::get_instance().register_server(server_name_);
   if (!rpc_server->start(std::move(service))) {
     LOG(ERROR) << "Failed to start brpc disagg pd server on port "
                << FLAGS_disagg_pd_port;
@@ -372,7 +384,11 @@ std::vector<Batch> PDOOCScheduler::prepare_batch() {
                                       running_sequences_,
                                       running_sequences_budgets_);
 
-  if (!batches[0].empty()) {
+  bool is_batches_empty =
+      (std::all_of(batches.begin(), batches.end(), [](const Batch& one_batch) {
+        return one_batch.empty();
+      }));
+  if (!is_batches_empty) {
     // only update the scheduling latency when there are requests to process
     COUNTER_ADD(scheduling_latency_seconds, timer.elapsed_seconds());
   }
@@ -1155,7 +1171,7 @@ void PDOOCScheduler::prepare_offline_dispatch_queue() {
     for (size_t i = 0; i < running_requests_.size(); ++i) {
       auto& request = running_requests_[i];
       if (request && request->offline() && !request->sequences().empty() &&
-          !request->sequences()[0]->is_prefill_stage()) {
+          !request->sequences()[0]->is_chunked_prefill_stage()) {
         size_t req_len = request->sequences()[0]->num_tokens();
         if (req_len <= max_len) {
           size_t diff = preferred_len > req_len ? preferred_len - req_len

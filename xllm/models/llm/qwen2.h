@@ -17,6 +17,7 @@ limitations under the License.
 #pragma once
 
 #include "core/layers/qwen2_decoder_layer.h"
+#include "layers/common/rotary_embedding_util.h"
 #include "llm_model_base.h"
 
 // QWen2 model compatible with huggingface weights
@@ -46,22 +47,15 @@ class QWen2ModelImpl : public LlmModelImplBase<QWen2DecoderLayer> {
 
     blocks_ = register_module("layers", torch::nn::ModuleList());
     layers_.reserve(model_args.n_layers());
-    norm_ = register_module("norm", layer::RmsNorm(context));
-    for (auto i = 0; i < FLAGS_micro_batch_num; i++) {
-      embed_tokens_.push_back(layer::WordEmbedding(context));
-#if defined(USE_NPU)
-      atb_pos_embeds_.push_back(layer::PosEmbedding(context));
-#endif
-    }
-    cos_sin_ = get_concat_rotary_embedding(
+    norm_ = register_module("norm", layer::RMSNorm(context));
+    embed_tokens_ =
+        register_module("embed_tokens", layer::WordEmbedding(context));
+
+    cos_sin_ = layer::rotary::get_concat_rotary_embedding(
         model_args.hidden_size() / model_args.n_heads(),
         model_args.max_position_embeddings(),
         model_args.rope_theta(),
         options);
-    int32_t mask_value = FLAGS_enable_chunked_prefill ? -9984 : 1;
-    attn_mask_ = layer::AttentionMask(options.device(),
-                                      options.dtype().toScalarType(),
-                                      /*mask_value=*/mask_value);
 
     for (int32_t i = 0; i < model_args.n_layers(); i++) {
       auto block = QWen2DecoderLayer(context);

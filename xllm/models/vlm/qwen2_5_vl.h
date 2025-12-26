@@ -15,7 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#include <atb/atb_infer.h>
 #include <c10/core/ScalarType.h>
 #include <torch/torch.h>
 
@@ -25,13 +24,11 @@ limitations under the License.
 #include "core/framework/model/model_input_params.h"
 #include "core/layers/lm_head.h"
 #include "core/layers/qwen2_decoder_layer.h"
-#include "core/layers/qwen2dot5_vision_decode_layer.h"
-#include "core/layers/rms_norm.h"
+#include "core/layers/qwen2dot5_vision_encode_layer.h"
 #include "models/llm/qwen2.h"
 #include "models/model_registry.h"
 #include "processors/input_processor.h"
 #include "processors/qwen2_vl_image_processor.h"
-#include "xllm_kernels/core/include/atb_speed/log.h"
 
 namespace xllm {
 
@@ -174,11 +171,6 @@ class Qwen2_5_VisionBlockImpl : public torch::nn::Module {
     encoder_layer_->load_state_dict(state_dict);
   }
 
-  void verify_loaded_weights(const std::string& prefix) const {
-    encoder_layer_->verify_loaded_weights();
-  }
-  void merge_loaded_weights() { encoder_layer_->merge_loaded_weights(); }
-
  private:
   layer::Qwen2dot5VisionEncoderLayer encoder_layer_{nullptr};
 };
@@ -287,7 +279,10 @@ class Qwen2_5_VisionPatchMergerImpl : public torch::nn::Module {
 
     hidden_size_ =
         context_dim * static_cast<int>(std::pow(spatial_merge_size, 2));
-    ln_q_ = register_module("ln_q", layer::RmsNorm(context));
+
+    ln_q_ = register_module(
+        "ln_q",
+        layer::RMSNorm(context_dim, model_args.rms_norm_eps(), options));
 
     auto cpl = torch::nn::Linear(
         torch::nn::LinearOptions(hidden_size_, hidden_size_).bias(true));
@@ -303,7 +298,7 @@ class Qwen2_5_VisionPatchMergerImpl : public torch::nn::Module {
   }
 
   torch::Tensor forward(torch::Tensor x) {
-    x = ln_q_(x, 0);
+    x = std::get<0>(ln_q_(x));
     x = x.view({-1, hidden_size_});
     return mlp_->forward(x);
   }
@@ -344,24 +339,10 @@ class Qwen2_5_VisionPatchMergerImpl : public torch::nn::Module {
     }
   }
 
-  void verify_loaded_weights(const std::string& prefix) const {
-    ln_q_->verify_loaded_weights(prefix + "ln_q.");
-    CHECK(is_cpl_weight_loaded)
-        << "weight is not loaded for " << prefix + "mlp.0" + ".weight";
-    CHECK(is_cpl_bias_loaded)
-        << "bias is not loaded for " << prefix + "mlp.0" + ".bias";
-    CHECK(is_rpl_weight_loaded)
-        << "weight is not loaded for " << prefix + "mlp.2" + ".weight";
-    CHECK(is_rpl_bias_loaded)
-        << "bias is not loaded for " << prefix + "mlp.2" + ".bias";
-  }
-
-  void merge_loaded_weights() { ln_q_->merge_loaded_weights(); }
-
  private:
   int64_t hidden_size_;
 
-  layer::RmsNorm ln_q_{nullptr};
+  layer::RMSNorm ln_q_{nullptr};
   torch::nn::Sequential mlp_{nullptr};
   std::tuple<torch::nn::Linear, torch::nn::GELU, torch::nn::Linear> layers_ = {
       nullptr,
@@ -564,16 +545,10 @@ class Qwen2_5_VisionTransformerImpl : public torch::nn::Module {
     cu_seqlens = F::pad(
         cu_seqlens, F::PadFuncOptions({1, 0}).mode(torch::kConstant).value(0));
 
-    // transformers
-    cu_seqlens = torch::diff(cu_seqlens);
-    cu_window_seqlens = torch::diff(cu_window_seqlens);
     m_cos = rotary_pos_emb.cos().type_as(hidden_states);
-    m_cos = torch::nn::functional::pad(
-        m_cos, torch::nn::functional::PadFuncOptions({0, 24}));
-    m_cos = m_cos.repeat({1, 2});
     m_sin = rotary_pos_emb.sin().type_as(hidden_states);
-    m_sin = torch::nn::functional::pad(
-        m_sin, torch::nn::functional::PadFuncOptions({0, 24}));
+
+    m_cos = m_cos.repeat({1, 2});
     m_sin = m_sin.repeat({1, 2});
     ModelInputParams& input_params_new =
         const_cast<ModelInputParams&>(input_params);
@@ -621,22 +596,6 @@ class Qwen2_5_VisionTransformerImpl : public torch::nn::Module {
     }
 
     merger_->load_state_dict(state_dict.get_dict_with_prefix("merger."));
-  }
-
-  void verify_loaded_weights(const std::string& prefix) const {
-    patch_embed_->verify_loaded_weights(prefix + "patch_embed.");
-    for (int idx = 0; idx < blocks_->size(); ++idx) {
-      layers_[idx]->verify_loaded_weights(prefix + "blocks." +
-                                          std::to_string(idx) + ".");
-    }
-    merger_->verify_loaded_weights(prefix + "merger.");
-  }
-
-  void merge_loaded_weights() {
-    for (int idx = 0; idx < blocks_->size(); ++idx) {
-      layers_[idx]->merge_loaded_weights();
-    }
-    merger_->merge_loaded_weights();
   }
 
  private:
@@ -697,15 +656,24 @@ class Qwen2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
       auto is_multimodal = torch::isin(input_ids, model_args_.image_token_id());
       inputs_embeds.index_put_({is_multimodal}, image_embeds);
     }
+    if (video_input) {
+      // visual
+      auto video_embeds = visual_(video_input->pixel_values_videos.to(options_),
+                                  video_input->video_grid_thw,
+                                  input_params);
+      // merge
+      auto is_multimodal = torch::isin(input_ids, model_args_.video_token_id());
+      inputs_embeds.index_put_({is_multimodal}, video_embeds);
+    }
     return inputs_embeds;
   }
 
-  torch::Tensor forward(const std::vector<torch::Tensor>& tokens,
-                        const std::vector<torch::Tensor>& positions,
+  torch::Tensor forward(const torch::Tensor& tokens,
+                        const torch::Tensor& positions,
                         std::vector<KVCache>& kv_caches,
-                        const std::vector<ModelInputParams>& input_params) {
+                        const ModelInputParams& input_params) {
     torch::NoGradGuard no_grad;
-    const auto& mm_data = input_params[0].mm_data;
+    const auto& mm_data = input_params.mm_data;
 
     torch::Tensor pixel_values;
     if (const auto& res = mm_data.get<torch::Tensor>("pixel_values"))
@@ -715,14 +683,32 @@ class Qwen2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
     if (const auto& res = mm_data.get<torch::Tensor>("image_grid_thw"))
       image_grid_thw = res.value();
 
+    torch::Tensor pixel_values_videos;
+    if (const auto& res = mm_data.get<torch::Tensor>("pixel_values_videos"))
+      pixel_values_videos = res.value();
+
+    torch::Tensor video_grid_thw;
+    if (const auto& res = mm_data.get<torch::Tensor>("video_grid_thw"))
+      video_grid_thw = res.value();
+
+    torch::Tensor second_per_grid_ts;
+    if (const auto& res = mm_data.get<torch::Tensor>("second_per_grid_ts"))
+      second_per_grid_ts = res.value();
+
     std::optional<Qwen2_5_VLImageInputs> image_inputs;
     std::optional<Qwen2_5_VLVideoInputs> video_inputs;
 
     if (pixel_values.defined() && image_grid_thw.defined())
       image_inputs = Qwen2_5_VLImageInputs{pixel_values, image_grid_thw};
-    auto inputs_embeds = get_input_embeddings(
-        tokens[0], image_inputs, video_inputs, input_params[0]);
-    input_params[0].input_embedding = inputs_embeds;
+
+    if (pixel_values_videos.defined() && video_grid_thw.defined() &&
+        second_per_grid_ts.defined())
+      video_inputs = Qwen2_5_VLVideoInputs{
+          pixel_values_videos, video_grid_thw, second_per_grid_ts};
+
+    auto inputs_embeds =
+        get_input_embeddings(tokens, image_inputs, video_inputs, input_params);
+    input_params.input_embedding = inputs_embeds;
 
     auto emb = language_model_(tokens, positions, kv_caches, input_params);
 
@@ -738,9 +724,7 @@ class Qwen2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
     for (const auto& state_dict : loader->get_state_dicts()) {
       visual_->load_state_dict(state_dict->get_dict_with_prefix("visual."));
     }
-    // verify
-    visual_->verify_loaded_weights("visual.");
-    visual_->merge_loaded_weights();
+
     if (!model_args_.image_embedding_mode()) {
       language_model_->load_model(std::move(loader));
     }
@@ -749,11 +733,11 @@ class Qwen2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
   layer::LmHead get_lm_head() { return language_model_->get_lm_head(); }
   void set_lm_head(layer::LmHead& head) { language_model_->set_lm_head(head); }
 
-  std::vector<layer::WordEmbedding> get_word_embedding() {
+  layer::WordEmbedding get_word_embedding() {
     return language_model_->get_word_embedding();
   }
 
-  void set_word_embedding(std::vector<layer::WordEmbedding>& word_embedding) {
+  void set_word_embedding(layer::WordEmbedding& word_embedding) {
     language_model_->set_word_embedding(word_embedding);
   }
 
@@ -814,7 +798,9 @@ REGISTER_MODEL_ARGS(qwen2_5_vl, [&] {
   LOAD_ARG_OR(mm_spatial_merge_size, "vision_config.spatial_merge_size", 2);
   LOAD_ARG_OR(mm_spatial_patch_size, "vision_config.spatial_patch_size", 14);
   LOAD_ARG_OR(mm_window_size, "vision_config.window_size", 112);
-  LOAD_ARG(mm_fullatt_block_indexes, "vision_config.fullatt_block_indexes");
+  LOAD_ARG_OR(mm_fullatt_block_indexes,
+              "vision_config.fullatt_block_indexes",
+              std::vector<int64_t>({7, 15, 23, 31}));
   LOAD_ARG_OR(mm_tokens_per_second, "vision_config.tokens_per_second", 2);
   LOAD_ARG_OR(mm_temporal_patch_size, "vision_config.temporal_patch_size", 2);
   LOAD_ARG_OR_FUNC(mm_head_dim, "head_dim", [&] {

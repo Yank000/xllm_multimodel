@@ -55,7 +55,7 @@ class Request : public RequestBase {
 
   SequencesGroup* sequence_group() { return sequences_group_.get(); }
 
-  void set_cancel() { cancelled_.store(true, std::memory_order_relaxed); }
+  void set_cancel();
 
   bool cancelled() const { return cancelled_.load(std::memory_order_relaxed); }
 
@@ -92,7 +92,9 @@ class Request : public RequestBase {
     return state_.sampling_param.beam_width > 1;
   }
 
-  bool is_prefill_stage() const { return sequences_group_->is_prefill_stage(); }
+  bool is_chunked_prefill_stage() const {
+    return sequences_group_->is_chunked_prefill_stage();
+  }
 
  private:
   RequestState state_;

@@ -9,12 +9,14 @@ cc_library(
     global_flags.h
     instance_name.h
     macros.h
+    message.h
     metrics.h
     $<$<BOOL:${USE_NPU}>:mspti_helper.h>
     options.h
     rate_limiter.h
     types.h
     device_monitor.h
+    version_singleton.h
   SRCS
     etcd_client.cpp
     global_flags.cpp

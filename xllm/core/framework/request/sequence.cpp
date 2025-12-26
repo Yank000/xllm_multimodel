@@ -101,7 +101,7 @@ void Sequence::append_token(const Token& token) {
   CHECK_LT(num_tokens_, tokens_.size())
       << "exceed the token capacity of the sequence";
   CHECK(!finished_) << "cannot append token to a finished sequence";
-  CHECK(kv_state_.kv_cache_tokens_num() > 0 && !is_prefill_stage())
+  CHECK(kv_state_.kv_cache_tokens_num() > 0 && !is_chunked_prefill_stage())
       << "cannot append token to a prefill sequence";
 
   if (!sequence_params_.enable_schedule_overlap) {
@@ -230,7 +230,6 @@ void Sequence::update_embeddings(const torch::Tensor& embeddings) {
     if (output_embedding_.dim() == 1) {
       output_embedding_ = output_embedding_.unsqueeze(0);
     }
-    mm_data_ = MMData(MMType::EMBEDDING, {{"embedding", output_embedding_}});
   }
 }
 

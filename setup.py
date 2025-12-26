@@ -11,6 +11,7 @@ import sysconfig
 from pathlib import Path
 from typing import List
 from jinja2 import Template
+import argparse
 
 from distutils.core import Command
 from setuptools import Extension, setup, find_packages
@@ -30,6 +31,37 @@ def get_cpu_arch():
     else:
         raise ValueError(f"Unsupported architecture: {arch}")
 
+# get device type
+def get_device_type():
+    import torch
+
+    if torch.cuda.is_available():
+        return "cuda"
+
+    try:
+        import ixformer
+        return "ilu"
+    except ImportError:
+        pass
+
+    try:
+        import torch_mlu
+        if torch.mlu.is_available():
+            return "mlu"
+    except ImportError:
+        pass
+
+    try:
+        import torch_npu
+        if torch.npu.is_available():
+            return "a2"
+    except ImportError:
+        pass
+
+    print("Unsupported device type, please install torch, torch_mlu or torch_npu")
+    exit(1)
+
+
 def get_cxx_abi():
     try:
         import torch
@@ -45,6 +77,9 @@ def get_base_dir():
 def join_path(*paths):
     return os.path.join(get_base_dir(), *paths)
 
+# return the python version as a string like "310" or "311" etc
+def get_python_version():
+    return f"{sys.version_info.major}{sys.version_info.minor}"
 
 def get_version():
     # first read from environment variable
@@ -111,6 +146,14 @@ def get_torch_mlu_root_path():
         import torch_mlu
         import os
         return os.path.dirname(os.path.abspath(torch_mlu.__file__))
+    except ImportError:
+        return None
+
+def get_ixformer_root_path():
+    try:
+        import ixformer
+        import os
+        return os.path.dirname(os.path.abspath(ixformer.__file__))
     except ImportError:
         return None
 
@@ -224,9 +267,14 @@ def set_cuda_envs():
     os.environ["LIBTORCH_ROOT"] = get_torch_root_path()
     os.environ["PYTORCH_INSTALL_PATH"] = get_torch_root_path()
     os.environ["CUDA_TOOLKIT_ROOT_DIR"] = "/usr/local/cuda"
-    os.environ["NCCL_ROOT"] = get_nccl_root_path()
-    os.environ["NCCL_VERSION"] = "2"
-    
+
+def set_ilu_envs():
+    os.environ["PYTHON_INCLUDE_PATH"] = get_python_include_path()
+    os.environ["PYTHON_LIB_PATH"] =  get_torch_root_path()
+    os.environ["LIBTORCH_ROOT"] = get_torch_root_path()
+    os.environ["PYTORCH_INSTALL_PATH"] = get_torch_root_path()
+    os.environ["IXFORMER_INSTALL_PATH"] = get_ixformer_root_path()
+        
 class CMakeExtension(Extension):
     def __init__(self, name: str, path: str, sourcedir: str = "") -> None:
         super().__init__(name, sources=[])
@@ -240,6 +288,7 @@ class ExtBuild(build_ext):
         ("device=", None, "target device type (a3 or a2 or mlu or cuda)"),
         ("arch=", None, "target arch type (x86 or arm)"),
         ("install-xllm-kernels=", None, "install xllm_kernels RPM package (true/false)"),
+        ("generate-so=", None, "generate so or binary"),
     ]
 
     def initialize_options(self):
@@ -248,6 +297,7 @@ class ExtBuild(build_ext):
         self.device = None  
         self.arch = None
         self.install_xllm_kernels = None
+        self.generate_so = False
 
     def finalize_options(self):
         build_ext.finalize_options(self)
@@ -275,7 +325,8 @@ class ExtBuild(build_ext):
             for ext in self.extensions:
                 self.build_extension(ext)
         except Exception as e:
-            print("Build failed.")
+            print("ERROR: Build failed.")
+            print(f"Details: {e}")
             exit(1)
 
     def build_extension(self, ext: CMakeExtension):
@@ -292,6 +343,15 @@ class ExtBuild(build_ext):
         debug = int(os.environ.get("DEBUG", 0)) if self.debug is None else self.debug
         build_type = "Debug" if debug else "Release"
 
+        max_jobs = os.getenv("MAX_JOBS", str(os.cpu_count()))
+        max_jobs_int = int(max_jobs)
+        
+        # Limit archive (ar/ranlib) concurrency to avoid file locking conflicts.
+        # The ar tool requires exclusive access to archive files (.a files) when
+        # creating or updating static libraries. When multiple ar processes attempt
+        # to modify the same archive file simultaneously, they compete for file locks,
+        # which can cause deadlocks and hang the build process.
+        archive_jobs = min(8, max(1, max_jobs_int // 4))
         cmake_args = [
             "-G",
             "Ninja",
@@ -306,25 +366,32 @@ class ExtBuild(build_ext):
             f"-DDEVICE_TYPE=USE_{self.device.upper()}",
             f"-DDEVICE_ARCH={self.arch.upper()}",
             f"-DINSTALL_XLLM_KERNELS={'ON' if self.install_xllm_kernels else 'OFF'}",
+            f"-DCMAKE_JOB_POOLS=archive={archive_jobs}",
         ]
-        
+
         if self.device == "a2" or self.device == "a3":
             cmake_args += ["-DUSE_NPU=ON"]
-            # set npu environment variables
             set_npu_envs()
         elif self.device == "mlu":
             cmake_args += ["-DUSE_MLU=ON"]
-            # set mlu environment variables
             set_mlu_envs()
         elif self.device == "cuda":
             cuda_architectures = "80;89;90"
             cmake_args += ["-DUSE_CUDA=ON", 
                            f"-DCMAKE_CUDA_ARCHITECTURES={cuda_architectures}"]
-            # set cuda environment variables
             set_cuda_envs()
+        elif self.device == "ilu":
+            cmake_args += ["-DUSE_ILU=ON"]
+            set_ilu_envs()
         else:
             raise ValueError("Please set --device to a2 or a3 or mlu or cuda.")
 
+        product = "xllm"
+        if self.generate_so:
+            product = "libxllm.so"
+            cmake_args += ["-DGENERATE_SO=ON"]
+        else:
+            cmake_args += ["-DGENERATE_SO=OFF"]
 
         # Adding CMake arguments set as environment variable
         # (needed e.g. to build for ARM OSx on conda-forge)
@@ -333,15 +400,15 @@ class ExtBuild(build_ext):
 
         # check if torch binary is built with cxx11 abi
         if get_cxx_abi():
-            cmake_args += ["-DUSE_CXX11_ABI=ON"]
+            cmake_args += ["-DUSE_CXX11_ABI=ON", "-D_GLIBCXX_USE_CXX11_ABI=1"]
         else:
-            cmake_args += ["-DUSE_CXX11_ABI=OFF"]
+            cmake_args += ["-DUSE_CXX11_ABI=OFF", "-D_GLIBCXX_USE_CXX11_ABI=0"]
         
         build_args = ["--config", build_type]
-        max_jobs = os.getenv("MAX_JOBS", str(os.cpu_count()))
         build_args += ["-j" + max_jobs]
 
         env = os.environ.copy()
+        env["VCPKG_MAX_CONCURRENCY"] = str(max_jobs)
         print("CMake Args: ", cmake_args)
         print("Env: ", env)
 
@@ -357,7 +424,7 @@ class ExtBuild(build_ext):
 
         os.makedirs(os.path.join(os.path.dirname(cmake_dir), "xllm/core/server/"), exist_ok=True)
         shutil.copy(
-            os.path.join(extdir, "xllm"),
+            os.path.join(extdir, product),
             os.path.join(os.path.dirname(cmake_dir), "xllm/core/server/"),
         )
 
@@ -397,9 +464,9 @@ class BuildDistWheel(bdist_wheel):
         self.run_command('test')
 
         if self.arch == 'arm':
-            ext_path = get_base_dir() + "/build/lib.linux-aarch64-cpython-311/"
+            ext_path = get_base_dir() + f"/build/lib.linux-aarch64-cpython-{get_python_version()}/"
         else:
-            ext_path = get_base_dir() + "/build/lib.linux-x86_64-cpython-311/"
+            ext_path = get_base_dir() + f"/build/lib.linux-x86_64-cpython-{get_python_version()}/"
         if len(ext_path) == 0:
             print("Build wheel failed, not found path.")
             exit(1)
@@ -550,39 +617,80 @@ def pre_build():
         if not run_shell_command("sh third_party/dependencies.sh", cwd=script_path):
             print("❌ Failed to reset changes!")
             exit(0)
+            
+def parse_arguments():
+    parser = argparse.ArgumentParser(
+        description='Setup helper for building xllm',
+        epilog='Example: python setup.py build --device a3',
+        usage='%(prog)s [COMMAND] [OPTIONS]'
+    )
+    
+    parser.add_argument(
+        'setup_args',
+        nargs='*',
+        metavar='argparse.REMAINDER',
+        help='setup command (build, test, bdist_wheel, etc.)'
+    )
+    
+    parser.add_argument(
+        '--device',
+        type=str.lower,
+        choices=['auto', 'a2', 'a3', 'mlu', 'cuda', 'ilu'],
+        default='auto',
+        help='Device type: a2, a3, mlu, ilu or cuda (case-insensitive)'
+    )
+    
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Dry run mode (do not execute pre_build)'
+    )
+    
+    parser.add_argument(
+        '--install-xllm-kernels',
+        type=str.lower,
+        choices=['true', 'false', '1', '0', 'yes', 'no', 'y', 'n', 'on', 'off'],
+        default='true',
+        help='Whether to install xllm kernels'
+    )
+    
+    parser.add_argument(
+        '--generate-so',
+        type=str.lower,
+        choices=['true', 'false', '1', '0', 'yes', 'no', 'y', 'n', 'on', 'off'],
+        default='false',
+        help='Whether to generate so or binary'
+    )
+
+    args = parser.parse_args()
+    
+    sys.argv = [sys.argv[0]] + args.setup_args
+    
+    install_kernels = args.install_xllm_kernels.lower() in ('true', '1', 'yes', 'y', 'on')
+    generate_so = args.generate_so.lower() in ('true', '1', 'yes', 'y', 'on')
+
+    return {
+        'device': args.device,
+        'dry_run': args.dry_run,
+        'install_xllm_kernels': install_kernels,
+        'generate_so': generate_so,
+    }
+
 
 if __name__ == "__main__":
-    device = 'a2'  # default
+    config = parse_arguments()
+
     arch = get_cpu_arch()
-    install_kernels = True
-    if '--device' in sys.argv:
-        idx = sys.argv.index('--device')
-        if idx + 1 < len(sys.argv):
-            device = sys.argv[idx+1].lower()
-            if device not in ('a2', 'a3', 'mlu', 'cuda'):
-                print("Error: --device must be a2 or a3 or mlu (case-insensitive)")
-                sys.exit(1)
-            # Remove the arguments so setup() doesn't see them
-            del sys.argv[idx]
-            del sys.argv[idx]
-    if '--dry_run' not in sys.argv:
-        pre_build()
-    else:
-        sys.argv.remove("--dry_run") 
+    device = config['device']
+    if device == 'auto':
+        device = get_device_type()
+    print(f"🚀 Build xllm with CPU arch: {arch} and target device: {device}")
     
-    if '--install-xllm-kernels' in sys.argv:
-        idx = sys.argv.index('--install-xllm-kernels')
-        if idx + 1 < len(sys.argv):
-            install_kernels = sys.argv[idx+1].lower()
-            if install_kernels in ('true', '1', 'yes', 'y', 'on'):
-                install_kernels = True
-            elif install_kernels in ('false', '0', 'no', 'n', 'off'):
-                install_kernels = False
-            else:
-                print("Error: --install-xllm-kernels must be true or false")
-                sys.exit(1)
-            sys.argv.pop(idx)
-            sys.argv.pop(idx)
+    if not config['dry_run']:
+        pre_build()
+
+    install_kernels = config['install_xllm_kernels']
+    generate_so = config['generate_so']
 
     if "SKIP_TEST" in os.environ:
         BUILD_TEST_FILE = False
@@ -604,7 +712,7 @@ if __name__ == "__main__":
         long_description=read_readme(),
         long_description_content_type="text/markdown",
         url="https://github.com/jd-opensource/xllm",
-        project_url={
+        project_urls={
             "Homepage": "https://xllm.readthedocs.io/zh-cn/latest/",
             "Documentation": "https://xllm.readthedocs.io/zh-cn/latest/",
         },
@@ -631,7 +739,8 @@ if __name__ == "__main__":
         options={'build_ext': {
                     'device': device,
                     'arch': arch,
-                    'install_xllm_kernels': install_kernels if install_kernels is not None else "false"
+                    'install_xllm_kernels': install_kernels,
+                    'generate_so': generate_so
                     },
                  'bdist_wheel': {
                     'device': device,

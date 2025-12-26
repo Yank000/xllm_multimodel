@@ -20,8 +20,16 @@ limitations under the License.
 
 #include <memory>
 
+#if defined(USE_MLU)
+#include "../mlu/attention.h"
+#elif defined(USE_CUDA)
+#include "../cuda/attention.h"
+#elif defined(USE_ILU)
+#include "../ilu/attention.h"
+#endif
+#include "core/framework/model_context.h"
 #include "framework/model/model_args.h"
-#include "layers/rotary_embedding.h"
+#include "rotary_embedding_util.h"
 
 namespace xllm {
 namespace layer {
@@ -33,6 +41,7 @@ class RotaryEmbeddingImpl : public torch::nn::Module {
                       int64_t rope_theta,
                       bool interleaved,
                       const torch::TensorOptions& options);
+  RotaryEmbeddingImpl(const ModelContext& context);
 
   void forward(torch::Tensor& q,
                torch::Tensor& k,
@@ -43,13 +52,36 @@ class RotaryEmbeddingImpl : public torch::nn::Module {
 
   torch::Tensor get_cos_sin_cache() { return cos_sin_cache_; }
 
- private:
+ protected:
   bool interleaved_;
+
+ private:
   torch::Tensor sin_;
   torch::Tensor cos_;
   torch::Tensor cos_sin_cache_;
 };
 TORCH_MODULE(RotaryEmbedding);
+
+class MRotaryEmbeddingImpl : public RotaryEmbeddingImpl {
+ public:
+  MRotaryEmbeddingImpl(int64_t rotary_dim,
+                       int64_t max_position_embeddings,
+                       int64_t rope_theta,
+                       bool interleaved,
+                       const std::vector<int64_t>& rope_scaling_mrope_section,
+                       const torch::TensorOptions& options);
+
+  void forward(torch::Tensor& q,
+               torch::Tensor& k,
+               const torch::Tensor& positions,
+               const AttentionMetadata& attn_metadata);
+
+ private:
+  bool interleaved_;
+  std::vector<int64_t> mrope_section_;
+  torch::Tensor mrope_cu_seq_lens_;
+};
+TORCH_MODULE(MRotaryEmbedding);
 
 class DeepseekScalingRotaryEmbeddingImpl : public torch::nn::Module {
  public:

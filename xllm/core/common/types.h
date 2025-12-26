@@ -31,6 +31,7 @@ class EngineType {
     SSM = 1,
     VLM = 2,
     DIT = 3,
+    REC = 4,
     INVALID = -1,
   };
 
@@ -44,6 +45,8 @@ class EngineType {
       value_ = VLM;
     } else if (str == "DIT") {
       value_ = DIT;
+    } else if (str == "REC") {
+      value_ = REC;
     } else {
       value_ = INVALID;
     }
@@ -68,6 +71,8 @@ class EngineType {
       return "VLM";
     } else if (this->value_ == DIT) {
       return "DIT";
+    } else if (this->value_ == REC) {
+      return "REC";
     } else {
       return "INVALID";
     }
@@ -284,17 +289,7 @@ struct EplbInfo {
   int32_t update_layer_id = -1;
 };
 
-struct MMInputData {
-  std::string type = "";
-  std::string text = "";
-  std::string image_url = "";
-  std::string video_url = "";
-  std::string audio_url = "";
-};
+inline constexpr int REC_TOKEN_SIZE = 3;
 
-struct MMChatMessage {
-  std::string role = "";
-  std::vector<MMInputData> content;
-};
-
+using RecTokenTriple = std::array<int32_t, REC_TOKEN_SIZE>;
 }  // namespace xllm

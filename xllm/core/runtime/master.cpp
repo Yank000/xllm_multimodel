@@ -80,6 +80,10 @@ Master::Master(const Options& options, EngineType type) : options_(options) {
 #endif
   FLAGS_enable_multi_stream_parallel =
       options.enable_multi_stream_parallel() && (options.nnodes() > 1);
+  if (FLAGS_enable_multi_stream_parallel) {
+    LOG(FATAL)
+        << "Multi-stream parallel is refactoring now, will be supported later.";
+  }
 
   // construct engine
   const auto devices =
@@ -218,7 +222,8 @@ Master::Master(const Options& options, EngineType type) : options_(options) {
         .enable_offline_inference(options_.enable_offline_inference())
         .spawn_worker_path(options_.spawn_worker_path())
         .enable_shm(options_.enable_shm())
-        .is_local(options_.is_local());
+        .is_local(options_.is_local())
+        .server_idx(options_.server_idx());
 
     if (options_.device_ip().has_value()) {
       eng_options.device_ip(options_.device_ip().value());

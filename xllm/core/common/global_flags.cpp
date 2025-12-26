@@ -89,9 +89,15 @@ DEFINE_bool(enable_acl_graph,
             "Whether to enable ACL graph execution for decode phase.");
 
 DEFINE_int32(max_seq_len_for_graph_mode,
-             20480,
-             "Maximum number of tokens per sequence for ACL graph execution.");
+             0,
+             "Maximum number of tokens per sequence for ACL graph execution. "
+             "If 0, use model max_position_embeddings.");
 
+DEFINE_bool(enable_acl_graph_no_padding,
+            false,
+            "Whether to enable ACL graph execution for decode phase without "
+            "padding. If true, graph will be caputured with every actual num "
+            "tokens, as stride is 1.");
 // --- vlm config ---
 
 DEFINE_int32(limit_image_per_prompt,
@@ -129,7 +135,7 @@ DEFINE_double(max_memory_utilization,
 
 DEFINE_int32(max_tokens_per_batch, 20480, "Max number of tokens per batch.");
 
-DEFINE_int32(max_seqs_per_batch, 256, "Max number of sequences per batch.");
+DEFINE_int32(max_seqs_per_batch, 1024, "Max number of sequences per batch.");
 
 DEFINE_bool(enable_schedule_overlap,
             true,
@@ -166,7 +172,7 @@ DEFINE_int32(ep_size, 1, "Expert parallel size for MoE model.");
 
 DEFINE_string(
     communication_backend,
-    "lccl",
+    "hccl",
     "NPU communication backend.(e.g. lccl, hccl). When enable dp, use hccl.");
 
 // --- ep load balance config ---
@@ -417,3 +423,54 @@ DEFINE_bool(
     "Whether to enable prefetch weight,only applicable to Qwen3-dense model."
     "The default prefetching ratio for gateup weight is 40%."
     "If adjustments are needed, e.g. export PREFETCH_COEFFOCIENT=0.5");
+
+// --- rec prefill-only mode ---
+DEFINE_bool(enable_rec_prefill_only,
+            false,
+            "Enable rec prefill-only mode (no decoder self-attention blocks "
+            "allocation).");
+
+// --- dp load balance ---
+
+DEFINE_bool(
+    enable_dp_balance,
+    false,
+    "Whether to enable dp load balance, if true, sequences within a single "
+    "dp batch will be shuffled.");
+
+// --- the seed for random number generator ---
+DEFINE_int32(random_seed, -1, "Random seed for random number generator.");
+
+// --- dit cache config ---
+
+DEFINE_string(dit_cache_policy,
+              "TaylorSeer",
+              "The policy of dit cache(e.g. None, FBCache, TaylorSeer, "
+              "FBCacheTaylorSeer).");
+
+DEFINE_int64(dit_cache_warmup_steps, 0, "The number of warmup steps.");
+
+DEFINE_int64(dit_cache_n_derivatives,
+             3,
+             "The number of derivatives to use in TaylorSeer.");
+
+DEFINE_int64(dit_cache_skip_interval_steps,
+             3,
+             "The interval steps to skip for derivative calculation.");
+
+DEFINE_double(dit_cache_residual_diff_threshold,
+              0.09f,
+              "The residual difference threshold for cache reuse.");
+
+DEFINE_bool(enable_constrained_decoding,
+            false,
+            "Whether to enable constrained decoding, which is used to ensure "
+            "that the output meets specific format or structural requirements "
+            "through pre-defined rules.");
+
+#if defined(USE_NPU)
+DEFINE_string(
+    npu_kernel_backend,
+    "ATB",
+    "NPU kernel backend. Supported options: ATB, TORCH. Default is ATB.");
+#endif
