@@ -113,6 +113,14 @@ class LLMEngine : public Engine {
 
   bool wakeup(int32_t master_status) override;
 
+  // XTensor mode: get GlobalXtensor offsets for allocated blocks via RPC
+  // Calls worker in the specified DP group to compute offsets
+  bool get_xtensor_offsets_for_blocks(
+      int32_t dp_rank,
+      const std::vector<int32_t>& block_ids,
+      std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>&
+          layer_offsets) override;
+
  private:
   friend class SpeculativeEngine;
   // setup workers internal

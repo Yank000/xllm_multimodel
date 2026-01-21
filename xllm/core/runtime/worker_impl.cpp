@@ -186,7 +186,8 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
       num_layers,
       [this](const std::vector<std::vector<int64_t>>& shape) {
         this->allocate_kv_cache(shape);
-      });
+      },
+      options_.model_id());
 
   init_hierarchy_kv_cache_transfer();
 
@@ -527,19 +528,12 @@ bool WorkerImpl::sleep(int32_t master_status) {
   // allocate; therefore, weights are only loaded into memory here for the light
   // sleep scenario (if not loaded before).
   if (master_status == LIGHT_SLEEP) {
+    // only load model weights to host memory.
     auto model_loader = ModelLoader::create(model_weights_path_);
     model_->lazy_load_model(std::move(model_loader));
   } else if (master_status == DEEP_SLEEP) {
+    // only release model weights from host memory.
     model_->offload_model_weights();
-  }
-
-  // Release weight pages from GlobalXtensor
-  if (FLAGS_enable_xtensor) {
-    const std::string& model_id = options_.model_id();
-    auto& allocator = XTensorAllocator::get_instance();
-    size_t freed_pages = allocator.free_weight_from_global_xtensor(model_id);
-    LOG(INFO) << "Worker sleep: freed " << freed_pages
-              << " weight pages from GlobalXtensor for model " << model_id;
   }
 
   return true;
