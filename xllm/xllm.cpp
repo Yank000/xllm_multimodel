@@ -42,6 +42,12 @@ limitations under the License.
 #include "models/model_registry.h"
 #include "parser/reasoning_parser.h"
 #include "server/xllm_server_registry.h"
+
+#if defined(USE_NPU)
+#include "torch_memory.h"
+#include "torch_npu/csrc/npu/NPUPluggableAllocator.h"
+#endif
+
 using namespace xllm;
 
 static std::atomic<uint32_t> signal_received{0};
@@ -247,6 +253,13 @@ int run() {
 
   InstanceName::name()->set_name(options.instance_name().value_or(""));
 
+  // TODO: add multi-node logic
+  std::shared_ptr<c10_npu::NPUCachingAllocator::NPUAllocator> torch_allocator =
+      torch::npu::NPUPluggableAllocator::createCustomAllocator(my_custom_alloc,
+                                                               my_custom_free);
+
+  torch::npu::NPUPluggableAllocator::changeCurrentAllocator(torch_allocator);
+
   // master node
   // init XTensor allocator and PhyPagePool for xtensor mode
   if (FLAGS_enable_xtensor) {
@@ -275,6 +288,8 @@ int run() {
       LOG(FATAL) << "Failed to initialize PhyPagePool";
     }
     LOG(INFO) << "XTensor initialized with " << num_pages << " physical pages";
+
+    allocator.create_activation_tensor(10000);  // 20GB激活
   }
 
   std::unique_ptr<Master> master;

@@ -142,6 +142,17 @@ class XTensorAllocator {
     return xtensor_dist_clients_;
   }
 
+  bool create_activation_tensor(int64_t num_pages);
+  bool allocate_activation(void*& ptr, size_t size);
+  bool deallocate_activation(void*& ptr, size_t size);
+  size_t activation_tensor_pagesize() {
+    return activation_tensor_->alloc_offset() / 2 / 1024 / 1024;
+  }
+
+  void activation_tensor_reset() { activation_tensor_->reset(); }
+
+  void activation_tensor_map_to_async(size_t num_pages);
+
   // Get device
   const torch::Device& device() const { return dev_; }
 
@@ -224,6 +235,10 @@ class XTensorAllocator {
 
   // Per-model tensors storage (key: model_id)
   std::unordered_map<std::string, ModelTensors> model_tensors_;
+
+  // Activation tensor (one large tensor for all model activations)
+  std::unique_ptr<XTensor> activation_tensor_;
+  double total_time = 0;
 
   // Zero page pointer (owned by PhyPagePool, not this class)
   PhyPage* zero_page_ = nullptr;

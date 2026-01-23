@@ -64,6 +64,28 @@ LLMEngine::LLMEngine(const runtime::Options& options,
 
   CHECK(!devices[0].is_cpu()) << "CPU device is not supported";
   const auto device_type = devices[0].type();
+  std::ifstream file("/export/home/ext.yanke6/tokenpage.txt");
+  if (!file.is_open()) {
+    std::cerr << "Unable to open file: "
+              << "/export/home/ext.yanke6/tokenpage.txt" << std::endl;
+    return;
+  }
+
+  std::string line;
+  while (std::getline(file, line)) {
+    std::stringstream ss(line);
+    int x, y;
+
+    // 读取每行的x和y
+    if (ss >> x >> y) {
+      act_map_[x] = y;  // 将x和y插入到map中
+    } else {
+      std::cerr << "Invalid line format: " << line << std::endl;
+    }
+  }
+
+  file.close();
+
   for (const auto device : devices) {
     CHECK_EQ(device.type(), device_type)
         << "All devices should be the same type";
@@ -765,6 +787,15 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
   DCHECK(dp_size_ == raw_forward_inputs.size())
       << "The processed raw forward inputs size " << raw_forward_inputs.size()
       << " is not equal to dp size " << dp_size_ << ".";
+  // TODO: refactor this
+  size_t index = raw_forward_inputs[0].dp_global_token_nums[0] / 10 * 10;
+  if (index == 0) {
+    index = 10;
+  }
+  size_t num_pages = act_map_[index];
+
+  // XTensorAllocator::get_instance().activation_tensor_map_to_async(
+  //     num_pages);  // 更新metadata，释放激活值
 
   std::vector<folly::SemiFuture<std::optional<RawForwardOutput>>> futures;
   futures.reserve(worker_clients_num_);
@@ -810,6 +841,25 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
   }
 
   COUNTER_ADD(engine_latency_seconds, timer.elapsed_seconds());
+
+  // XTensorAllocator::get_instance().activation_tensor_reset();//更新metadata，释放激活值
+
+  /*
+  std::ofstream log_file("/export/home/ext.yanke6/tokenpage.txt",
+  std::ios::app);  // 以追加模式打开文件
+
+  if (log_file.is_open()) {
+      // 将参数写入文件
+      log_file << raw_forward_inputs[0].dp_global_token_nums
+              << " " <<
+  XTensorAllocator::get_instance().activation_tensor_pagesize()
+              << std::endl;
+      // 关闭文件
+      log_file.close();
+  } else {
+      std::cerr << "Unable to open log file!" << std::endl;
+  }
+  */
   return {};
 }
 

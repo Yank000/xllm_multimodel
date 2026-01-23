@@ -30,6 +30,15 @@ namespace xllm {
 // Type definitions (page_id_t is defined in phy_page.h)
 using offset_t = page_id_t;
 
+struct memory_block {  // activation space allocated
+  size_t offset;
+  size_t size;
+
+  bool operator<(const memory_block& other) const {
+    return offset < other.offset;  // 按照offset排序
+  }
+};
+
 /* NOTE: XTensorAllocator is thread-safe but XTensor is not. */
 class XTensor {
  public:
@@ -52,6 +61,26 @@ class XTensor {
   // size: size in bytes to allocate
   // Returns true on success, false on failure
   bool allocate(void*& ptr, size_t size);
+
+  // Allocate activation memory from this tensor
+  bool allocate_activation(void*& ptr, size_t size);
+
+  // Allocate activation memory from this tensor
+  bool deallocate_activation(void*& ptr, size_t size);
+
+  void worker();
+
+  void reset() { allocated_blocks.clear(); }
+
+  void map_to_async(size_t target_page) {
+    if (!allocated_blocks.empty()) {
+      memory_block last = *allocated_blocks.rbegin();
+      target_ = std::max(
+          target_page, (last.offset + last.size + page_size_ - 1) / page_size_);
+    } else {
+      target_ = target_page;
+    }
+  }
 
   // Get the current allocation offset (for debugging/info)
   size_t alloc_offset() const noexcept { return alloc_offset_; }
@@ -90,6 +119,8 @@ class XTensor {
   // Map a single physical page at the given offset
   bool map_phy_page_(PhyPage* page, offset_t offset);
   bool init_with_zero_();
+  size_t best_fit(size_t request_size);
+  void start_worker_thread();
 
   VirPtr vaddr_;
   size_t size_;
@@ -103,6 +134,19 @@ class XTensor {
 
   // Bump allocator offset for weight allocation
   size_t alloc_offset_ = 0;
+
+  std::set<memory_block> allocated_blocks;
+
+  mutable std::mutex mtx_;
+  std::condition_variable cond_;
+  size_t target_ = 0;
+  std::atomic<bool> worker_running_{false};
+  double total_map_time = 0;
+  double total_unmap_time = 0;
+  double total_unmap_time_extra = 0;
+  int32_t map_count = 0;
+  int32_t unmap_count = 0;
+  size_t empty_size_mb = 0;
 };
 
 }  // namespace xllm

@@ -549,6 +549,73 @@ bool XTensorAllocator::unmap_from_kv_tensors(
   return true;
 }
 
+bool XTensorAllocator::create_activation_tensor(int64_t num_pages) {
+  // Create activation tensor if not exists (no physical page mapping)
+  if (!activation_tensor_) {
+    size_t page_size = FLAGS_phy_page_granularity_size;
+    size_t size = num_pages * page_size;
+
+    // Get zero page from pool if not exists
+    if (!zero_page_) {
+      zero_page_ = PhyPagePool::get_instance().get_zero_page();
+    }
+
+    activation_tensor_ =
+        std::make_unique<XTensor>(size, torch::kByte, dev_, zero_page_);
+    // activation_num_pages_ = num_pages;
+    LOG(INFO) << "Created activation XTensor "
+              << ": num_pages=" << num_pages << ", page_size=" << page_size
+              << ", total_size=" << size << " (no mapping)";
+  }
+
+  return true;
+}
+
+void XTensorAllocator::activation_tensor_map_to_async(size_t num_pages) {
+  if (!activation_tensor_) {
+    LOG(ERROR)
+        << "Activation tensor not created, call create_activation_tensor first";
+    return;
+  }
+
+  activation_tensor_->map_to_async(num_pages);
+}
+
+bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
+  std::lock_guard<std::mutex> lock(mtx_);
+
+  // auto start = std::chrono::high_resolution_clock::now();
+
+  if (!activation_tensor_) {
+    LOG(ERROR)
+        << "Activation tensor not created, call create_activation_tensor first";
+    return false;
+  }
+
+  activation_tensor_->allocate_activation(ptr, size);
+  /*
+          auto end = std::chrono::high_resolution_clock::now();
+          std::chrono::duration<double> duration = end - start;
+
+          // 累加总耗时
+          total_time += duration.count();
+          LOG(INFO) << "[best_fit] total_time: " << total_time << " seconds";
+  */
+  return true;
+}
+
+bool XTensorAllocator::deallocate_activation(void*& ptr, size_t size) {
+  std::lock_guard<std::mutex> lock(mtx_);
+
+  if (!activation_tensor_) {
+    LOG(ERROR)
+        << "Activation tensor not created, call create_activation_tensor first";
+    return false;
+  }
+
+  return activation_tensor_->deallocate_activation(ptr, size);
+}
+
 void XTensorAllocator::record_weight_allocation(const std::string& model_id,
                                                 page_id_t start_page_id,
                                                 size_t num_pages) {

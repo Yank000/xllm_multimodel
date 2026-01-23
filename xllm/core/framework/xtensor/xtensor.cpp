@@ -57,6 +57,7 @@ XTensor::XTensor(size_t size,
 
 XTensor::~XTensor() {
   // Collect all physical pages to return in batch
+  worker_running_ = false;
   std::vector<std::unique_ptr<PhyPage>> pages_to_return;
   pages_to_return.reserve(mapping_.size());
   for (auto& [page_id, page] : mapping_) {
@@ -140,6 +141,39 @@ bool XTensor::unmap(offset_t offset) {
   return true;
 }
 
+void XTensor::worker() {
+  while (worker_running_) {
+    // 检查是否需要进行map操作
+    if (alloc_offset_ < target_ * page_size_) {  // map
+      if (!map(alloc_offset_)) {
+        LOG(ERROR) << "Failed to map page at offset " << alloc_offset_;
+      } else {
+        alloc_offset_ += page_size_;
+        // empty_size_mb += page_size_;
+      }
+    } else if (alloc_offset_ > target_ * page_size_) {  // unmap
+      size_t offset = alloc_offset_ - page_size_;
+      if (!unmap(offset)) {
+        LOG(ERROR) << "Failed to unmap page at offset " << offset;
+      } else {
+        // empty_size_mb -= page_size_;
+        alloc_offset_ -= page_size_;
+      }
+    }
+
+    // 通过条件变量通知等待中的allocate_activation
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      cond_.notify_all();
+    }
+  }
+}
+
+void XTensor::start_worker_thread() {
+  std::thread worker_thread(&XTensor::worker, this);
+  worker_thread.detach();  // 分离线程，确保它不会阻塞主线程
+}
+
 bool XTensor::map_all() {
   for (size_t offset = 0; offset < size_; offset += page_size_) {
     if (!map(offset)) {
@@ -191,6 +225,138 @@ bool XTensor::init_with_zero_() {
     }
   }
   return succ;
+}
+
+bool XTensor::allocate_activation(void*& ptr, size_t size) {
+  size_t offset = best_fit(size);
+
+  if (offset + size > size_) {
+    LOG(ERROR) << "XTensor::allocate failed: requested " << size
+               << " bytes at offset " << alloc_offset_ << ", but only "
+               << (size_ - alloc_offset_) << " bytes available"
+               << " (total size: " << size_ << ")";
+    return false;
+  }
+
+  if (offset + size > target_ * page_size_) {
+    target_ = (offset + size + page_size_ - 1) / page_size_;
+    if (!worker_running_) {
+      worker_running_ = true;
+      start_worker_thread();
+    }
+  }
+  while (offset + size > alloc_offset_) {
+    std::unique_lock<std::mutex> lock(mtx_);
+    cond_.wait(lock);
+  }
+  // Check if already mapped
+  /*int64_t instant_map_size = offset + size - alloc_offset_;
+
+  if (instant_map_size > 0) {
+    size_t num_pages = (instant_map_size + page_size_ - 1) / page_size_;
+    for (int i = 0; i < num_pages; i++) {
+      if(!map(alloc_offset_)) {
+        LOG(ERROR) << "XTensor::allocate_activation: map_pages failed
+  insufficient physical pages"
+                << "for offset=" << alloc_offset_;
+        return false;
+      }
+      alloc_offset_ += page_size_;
+    }
+  }*/
+  // empty_size_mb -= size;
+  // LOG(INFO) << empty_size_mb/2048/1024 << "MB left";
+  ptr = reinterpret_cast<VirPtr>(reinterpret_cast<uintptr_t>(vaddr_) + offset);
+  // LOG(INFO) << "[allocate]: pageSize=" << size / page_size_ << ", pageId=" <<
+  // offset/page_size_;
+
+  // Async map reserved pages
+  // 模型初始化的时候就会调用该函数，所以当执行请求的时候已经存在预留池
+  /*
+  if (map_weight_tensorsync_map_pages > 0) {
+    std::thread t([this, async_map_pages]() {
+      while (alloc_offset_ < async_map_pages * page_size_) {
+          LOG(INFO) << "XTensor::deallocate: async unmap page at offset " <<
+  alloc_offset_/page_size_; map(alloc_offset_); alloc_offset_ += page_size_;
+      }
+    });
+    t.detach();
+  }*/
+
+  // LOG(INFO) << "XTensor::allocate_activation: size=" <<
+  // alloc_offset_/page_size_*2;
+
+  return true;
+}
+
+bool XTensor::deallocate_activation(void*& ptr, size_t size) {
+  // TODO: 实现收缩内存的逻辑
+  size_t offset =
+      reinterpret_cast<size_t>(ptr) - reinterpret_cast<size_t>(vaddr_);
+  // 查找目标内存块
+  auto it = allocated_blocks.lower_bound(memory_block{offset, 0});
+  if (it == allocated_blocks.end() || it->offset != offset ||
+      it->size != size) {
+    // LOG(ERROR) << "XTensor::deallocate failed: no matching block found for
+    // offset " << offset << " and size " << size;
+    return false;  // 没有找到对应的内存块
+  }
+
+  // 释放目标内存块
+  memory_block target_block = *it;
+  allocated_blocks.erase(it);
+  // empty_size_mb += size;
+
+  return true;
+}
+// 386mb/947
+size_t XTensor::best_fit(size_t request_size) {
+  size_t best_fit_offset = -1;
+  size_t best_fit_gap = size_ + 1;  // 初始值设为不可能的最大值
+
+  // 遍历已分配的内存块，查找合适的空闲区域
+  for (auto it = allocated_blocks.begin(); it != allocated_blocks.end(); ++it) {
+    size_t current_offset = it->offset;
+    size_t current_size = it->size;
+
+    // 检查分配块之间的空隙
+    if (it != allocated_blocks.begin()) {
+      auto prev_it = std::prev(it);
+      size_t gap = current_offset - (prev_it->offset + prev_it->size);
+      if (gap >= request_size && gap < best_fit_gap) {
+        best_fit_gap = gap;
+        best_fit_offset = prev_it->offset + prev_it->size;
+      }
+    }
+  }
+
+  // 检查最后一块内存之后的空隙
+  if (!allocated_blocks.empty()) {
+    auto last_block = *allocated_blocks.rbegin();
+    size_t gap = size_ - (last_block.offset + last_block.size);
+    if (gap >= request_size && gap < best_fit_gap) {
+      best_fit_gap = gap;
+      best_fit_offset = last_block.offset + last_block.size;
+    }
+  } else {
+    // 如果没有任何内存分配，直接从0开始
+    best_fit_offset = 0;
+  }
+
+  // 如果找到合适的空闲空间
+  if (best_fit_offset != -1) {
+    allocated_blocks.insert(memory_block{best_fit_offset, request_size});
+    return best_fit_offset;
+  }
+  // 如果没有合适的空闲空间，返回最后一个分配内存块的结束位置
+  if (!allocated_blocks.empty()) {
+    auto last_block = *allocated_blocks.rbegin();
+    best_fit_offset = last_block.offset + last_block.size;
+    allocated_blocks.insert(memory_block{best_fit_offset, request_size});
+    return best_fit_offset;
+  }
+  // 如果没有内存分配，返回 0
+  return 0;
 }
 
 bool XTensor::allocate(void*& ptr, size_t size) {

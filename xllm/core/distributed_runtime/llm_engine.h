@@ -184,6 +184,8 @@ class LLMEngine : public Engine {
 
   // threadpool for link cluster
   std::unique_ptr<ThreadPool> link_threadpool_;
+
+  std::unordered_map<size_t, size_t> act_map_;
 };
 
 }  // namespace xllm

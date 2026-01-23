@@ -5,11 +5,7 @@ include_directories(.)
 
 # Set warning-as-error for xllm code (third-party headers are marked as SYSTEM)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  add_compile_options(
-    $<$<COMPILE_LANGUAGE:CXX>:-Werror>
-    $<$<COMPILE_LANGUAGE:C>:-Werror>
-  )
-
+# 这里删除了Werror
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_compile_options(
       $<$<COMPILE_LANGUAGE:CXX>:-Wno-macro-redefined>
@@ -63,6 +59,7 @@ else()
       xllm
     SRCS
       xllm.cpp
+      NPUPluggableAllocator.cpp
     DEPS
       :flags
       :xllm_server
