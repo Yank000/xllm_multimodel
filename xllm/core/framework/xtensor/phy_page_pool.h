@@ -65,6 +65,12 @@ class PhyPagePool {
   // The pages are marked as allocated but ownership remains in all_pages_
   page_id_t allocate_contiguous_from_right(size_t count);
 
+  // Find and allocate contiguous pages from left side (for activation
+  // allocation) Returns the starting page_id of the contiguous segment, or -1
+  // if not found The pages are marked as allocated but ownership remains in
+  // all_pages_
+  page_id_t allocate_contiguous_from_left(size_t count);
+
   // Free pages that were allocated via allocate_contiguous_from_right
   // page_ids: vector of page_ids to free
   void free_weight_pages(const std::vector<page_id_t>& page_ids);

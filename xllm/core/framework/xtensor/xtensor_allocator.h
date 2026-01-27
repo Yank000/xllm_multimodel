@@ -142,16 +142,8 @@ class XTensorAllocator {
     return xtensor_dist_clients_;
   }
 
-  bool create_activation_tensor(int64_t num_pages);
   bool allocate_activation(void*& ptr, size_t size);
   bool deallocate_activation(void*& ptr, size_t size);
-  size_t activation_tensor_pagesize() {
-    return activation_tensor_->alloc_offset() / 2 / 1024 / 1024;
-  }
-
-  void activation_tensor_reset() { activation_tensor_->reset(); }
-
-  void activation_tensor_map_to_async(size_t num_pages);
 
   // Get device
   const torch::Device& device() const { return dev_; }
@@ -254,6 +246,30 @@ class XTensorAllocator {
   std::vector<std::shared_ptr<XTensorDistClient>> xtensor_dist_clients_;
   std::vector<std::unique_ptr<XTensorDistServer>> xtensor_dist_servers_;
   std::string collective_server_name_{"XTensorAllocatorCollectiveServer"};
+
+  // Activation slot allocation: ptr -> {page_id, start_slot, num_slots}
+  // Each slot is 512 bytes, allowing multiple tensors to share one physical
+  // page
+  struct SlotAllocation {
+    page_id_t page_id;
+    size_t start_slot;
+    size_t num_slots;
+  };
+  std::unordered_map<void*, SlotAllocation> activation_slot_map_;
+
+  // Slot bitmap for each physical page: page_id -> bitmap of free slots
+  // Each bit represents one 512-byte slot
+  std::unordered_map<page_id_t, std::vector<bool>> page_slot_bitmap_;
+
+  // Aligned size in bytes
+  // 512B is the best practice to balance memory utilization and performance
+  static constexpr size_t kBlockSize = 512;
+
+  size_t page_size_ = 0;
+  size_t slots_per_page_ = 0;
+
+  // used to measure fragmentation
+  size_t min_start_page_ = std::numeric_limits<size_t>::max();
 };
 
 }  // namespace xllm

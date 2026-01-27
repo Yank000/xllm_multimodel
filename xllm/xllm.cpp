@@ -288,8 +288,6 @@ int run() {
       LOG(FATAL) << "Failed to initialize PhyPagePool";
     }
     LOG(INFO) << "XTensor initialized with " << num_pages << " physical pages";
-
-    allocator.create_activation_tensor(10000);  // 20GB激活
   }
 
   std::unique_ptr<Master> master;

@@ -32,8 +32,6 @@ void* my_custom_alloc(size_t size, int device, aclrtStream stream) {
 
       aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_HUGE_FIRST);
   */
-  size_t alignment = 512;  // 512字节对齐 for correctness and performance
-  size = (size + alignment - 1) & ~(alignment - 1);
   bool res = XTensorAllocator::get_instance().allocate_activation(ptr, size);
   if (res != true) {
     fprintf(stderr,
@@ -68,7 +66,5 @@ void my_custom_free(void* ptr, size_t size, int device, aclrtStream stream) {
 
       aclrtFree(ptr);
   */
-  size_t alignment = 512;  // 512字节对齐
-  size = (size + alignment - 1) & ~(alignment - 1);
   bool res = XTensorAllocator::get_instance().deallocate_activation(ptr, size);
 }

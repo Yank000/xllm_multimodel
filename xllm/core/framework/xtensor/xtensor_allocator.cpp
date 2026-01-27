@@ -74,6 +74,8 @@ void XTensorAllocator::init(const torch::Device& device) {
 
   dev_ = device;
   init_device_();
+  page_size_ = FLAGS_phy_page_granularity_size;
+  slots_per_page_ = page_size_ / kBlockSize;
   initialized_ = true;
 }
 
@@ -549,71 +551,218 @@ bool XTensorAllocator::unmap_from_kv_tensors(
   return true;
 }
 
-bool XTensorAllocator::create_activation_tensor(int64_t num_pages) {
-  // Create activation tensor if not exists (no physical page mapping)
-  if (!activation_tensor_) {
-    size_t page_size = FLAGS_phy_page_granularity_size;
-    size_t size = num_pages * page_size;
+bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
+  // Calculate number of 512-byte slots needed
+  size_t num_slots = (size + kBlockSize - 1) / kBlockSize;
 
-    // Get zero page from pool if not exists
-    if (!zero_page_) {
-      zero_page_ = PhyPagePool::get_instance().get_zero_page();
+  if (world_size_ <= 1) {
+    std::lock_guard<std::mutex> lock(mtx_);
+
+    auto& global_xtensor = GlobalXtensor::get_instance();
+    auto& pool = PhyPagePool::get_instance();
+
+    // Case 1: Single page allocation (num_slots < slots_per_page_)
+    if (num_slots < slots_per_page_) {
+      // Step 1: Try to find a page with enough free slots
+      page_id_t selected_page = -1;
+      size_t start_slot = 0;
+
+      // First, try to find space in existing partially used pages
+      for (auto& [page_id, bitmap] : page_slot_bitmap_) {
+        size_t free_count = 0;
+        size_t start = 0;
+        for (size_t i = 0; i < slots_per_page_; i++) {
+          if (!bitmap[i]) {
+            if (free_count == 0) {
+              start = i;
+            }
+            free_count++;
+            if (free_count >= num_slots) {
+              selected_page = page_id;
+              start_slot = start;
+              break;
+            }
+          } else {
+            free_count = 0;
+          }
+        }
+        if (selected_page >= 0) {
+          break;
+        }
+      }
+
+      // Step 2: If no existing page has space, allocate a new page
+      if (selected_page < 0) {
+        selected_page = pool.allocate_contiguous_from_left(1);
+        if (selected_page < 0) {
+          LOG(ERROR) << "Failed to allocate new page for activation";
+          return false;
+        }
+        // Initialize bitmap for new page with all slots free
+        page_slot_bitmap_[selected_page] =
+            std::vector<bool>(slots_per_page_, false);
+        start_slot = 0;
+      }
+
+      // Step 3: Mark slots as allocated in bitmap
+      auto& bitmap = page_slot_bitmap_[selected_page];
+      for (size_t i = start_slot; i < start_slot + num_slots; i++) {
+        bitmap[i] = true;
+      }
+
+      // Step 4: Calculate virtual address
+      size_t offset_within_page = start_slot * kBlockSize;
+      ptr = reinterpret_cast<void*>(
+          reinterpret_cast<uintptr_t>(
+              global_xtensor.get_vaddr_by_page_id(selected_page)) +
+          offset_within_page);
+
+      // Step 5: Record allocation info
+      activation_slot_map_[ptr] = {selected_page, start_slot, num_slots};
+
+      VLOG(2) << "allocate_activation success: page_id=" << selected_page
+              << ", start_slot=" << start_slot << ", num_slots=" << num_slots
+              << ", ptr=" << ptr;
+      return true;
     }
 
-    activation_tensor_ =
-        std::make_unique<XTensor>(size, torch::kByte, dev_, zero_page_);
-    // activation_num_pages_ = num_pages;
-    LOG(INFO) << "Created activation XTensor "
-              << ": num_pages=" << num_pages << ", page_size=" << page_size
-              << ", total_size=" << size << " (no mapping)";
+    // Case 2: Multi-page allocation (num_slots > slots_per_page_)
+    // For large allocations, allocate contiguous physical pages
+    size_t num_pages_needed =
+        (num_slots + slots_per_page_ - 1) / slots_per_page_;
+
+    // Allocate contiguous pages from the pool
+    page_id_t start_page = pool.allocate_contiguous_from_left(num_pages_needed);
+    if (start_page < 0) {
+      LOG(ERROR) << "Failed to allocate " << num_pages_needed
+                 << " contiguous pages for activation (size=" << size << ")";
+      return false;
+    }
+
+    /*
+    因为多页独占物理页，所以标记全used
+    如果取消多页独占，去掉注释，同时修改多页deallocate中直接free掉的逻辑
+
+    // Initialize bitmap for last page
+    page_id_t page_id = start_page + num_pages_needed - 1;
+    auto& bitmap = page_slot_bitmap_[page_id];
+    bitmap.resize(slots_per_page_, false);
+
+    // Mark slots as allocated in this page
+    size_t slots_in_this_page = num_slots % slots_per_page_;
+    for (size_t i = 0; i < slots_in_this_page; i++) {
+      bitmap[i] = true;
+    }
+    */
+
+    // Calculate virtual address (start of first page)
+    ptr = global_xtensor.get_vaddr_by_page_id(start_page);
+
+    // Record allocation info (use first page, start_slot=0)
+    activation_slot_map_[ptr] = {start_page, 0, num_slots};
+
+    if (start_page < min_start_page_) {
+      LOG(INFO) << "allocate_activation (multi-page) success: start_page="
+                << start_page << ", num_pages=" << num_pages_needed
+                << ", num_slots=" << num_slots << ", ptr=" << ptr;
+      min_start_page_ = start_page;
+    }  // 独占：24299；共享：
+    return true;
   }
 
-  return true;
-}
-
-void XTensorAllocator::activation_tensor_map_to_async(size_t num_pages) {
-  if (!activation_tensor_) {
-    LOG(ERROR)
-        << "Activation tensor not created, call create_activation_tensor first";
-    return;
-  }
-
-  activation_tensor_->map_to_async(num_pages);
-}
-
-bool XTensorAllocator::allocate_activation(void*& ptr, size_t size) {
-  std::lock_guard<std::mutex> lock(mtx_);
-
-  // auto start = std::chrono::high_resolution_clock::now();
-
-  if (!activation_tensor_) {
-    LOG(ERROR)
-        << "Activation tensor not created, call create_activation_tensor first";
-    return false;
-  }
-
-  activation_tensor_->allocate_activation(ptr, size);
-  /*
-          auto end = std::chrono::high_resolution_clock::now();
-          std::chrono::duration<double> duration = end - start;
-
-          // 累加总耗时
-          total_time += duration.count();
-          LOG(INFO) << "[best_fit] total_time: " << total_time << " seconds";
-  */
-  return true;
+  LOG(INFO)
+      << "allocate_activation: distributed mode not fully implemented yet";
+  return false;
 }
 
 bool XTensorAllocator::deallocate_activation(void*& ptr, size_t size) {
   std::lock_guard<std::mutex> lock(mtx_);
 
-  if (!activation_tensor_) {
-    LOG(ERROR)
-        << "Activation tensor not created, call create_activation_tensor first";
+  // Find the slot allocation info
+  auto it = activation_slot_map_.find(ptr);
+  if (it == activation_slot_map_.end()) {
+    LOG(WARNING) << "deallocate_activation: ptr " << ptr << " not found";
     return false;
   }
 
-  return activation_tensor_->deallocate_activation(ptr, size);
+  SlotAllocation& alloc = it->second;
+  page_id_t start_page_id = alloc.page_id;
+  size_t start_slot = alloc.start_slot;
+  size_t num_slots = alloc.num_slots;
+
+  // Calculate number of pages involved
+  size_t num_pages = (num_slots + slots_per_page_ - 1) / slots_per_page_;
+
+  // For multi-page allocation or single-page with slot 0 start
+  if (num_slots >= slots_per_page_) {
+    // Multi-page allocation: free all pages at once
+    std::vector<page_id_t> page_ids;
+    page_ids.reserve(num_pages);
+    for (size_t p = 0; p < num_pages; p++) {
+      page_id_t page_id = start_page_id + p;
+      /*if(p == num_pages - 1) {
+        auto& bitmap_last_page = page_slot_bitmap_[page_id];
+        for (size_t i = slots_per_page_ - 1; i >= num_slots % slots_per_page_;
+      i--) { if (bitmap_last_page[i]) { for(size_t j = 0; j < num_slots %
+      slots_per_page_; j++) { bitmap_last_page[j] = false;
+            }
+            break;
+          }
+          if (i == num_slots % slots_per_page_) {
+            page_ids.push_back(page_id);
+            // Remove bitmap entry for this page
+            page_slot_bitmap_.erase(page_id);
+          }
+        }
+
+      } else {*/
+      page_ids.push_back(page_id);
+      // Remove bitmap entry for this page
+      //}
+    }
+
+    auto& pool = PhyPagePool::get_instance();
+    pool.free_weight_pages(page_ids);
+
+    VLOG(2) << "deallocate_activation (multi-page): freed " << num_pages
+            << " pages starting from " << start_page_id;
+  } else {
+    // Single-page allocation with partial usage
+    auto bitmap_it = page_slot_bitmap_.find(start_page_id);
+    if (bitmap_it != page_slot_bitmap_.end()) {
+      auto& bitmap = bitmap_it->second;
+      for (size_t i = start_slot;
+           i < start_slot + num_slots && i < slots_per_page_;
+           i++) {
+        bitmap[i] = false;
+      }
+
+      // Check if all slots in this page are free
+      bool all_free = true;
+      for (size_t i = 0; i < slots_per_page_; i++) {
+        if (bitmap[i]) {
+          all_free = false;
+          break;
+        }
+      }
+
+      // If all slots are free, free the page and remove bitmap entry
+      if (all_free) {
+        auto& pool = PhyPagePool::get_instance();
+        pool.free_weight_pages({start_page_id});
+        page_slot_bitmap_.erase(bitmap_it);
+        VLOG(2) << "deallocate_activation: freed entire page " << start_page_id;
+      }
+    }
+  }
+
+  // Remove allocation record
+  activation_slot_map_.erase(it);
+
+  VLOG(2) << "deallocate_activation success: start_page=" << start_page_id
+          << ", start_slot=" << start_slot << ", num_slots=" << num_slots
+          << ", num_pages=" << num_pages;
+  return true;
 }
 
 void XTensorAllocator::record_weight_allocation(const std::string& model_id,

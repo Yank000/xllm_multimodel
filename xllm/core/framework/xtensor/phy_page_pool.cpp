@@ -211,6 +211,57 @@ page_id_t PhyPagePool::allocate_contiguous_from_right(size_t count) {
   return start_page;
 }
 
+page_id_t PhyPagePool::allocate_contiguous_from_left(size_t count) {
+  std::lock_guard<std::mutex> lock(mtx_);
+
+  CHECK(initialized_) << "PhyPagePool not initialized";
+
+  if (count == 0 || count > free_page_ids_.size()) {
+    return -1;
+  }
+
+  // Scan from left to right in page_allocated_ to find contiguous free segment
+  size_t run = 0;
+  page_id_t start_page = -1;
+
+  for (size_t i = 0; i < num_total_pages_; ++i) {
+    if (!page_allocated_[i]) {
+      run++;
+      if (run == count) {
+        start_page = static_cast<page_id_t>(i - count + 1);
+        break;
+      }
+    } else {
+      run = 0;
+    }
+  }
+
+  if (start_page < 0) {
+    LOG(WARNING) << "PhyPagePool: cannot find " << count
+                 << " contiguous free pages from left";
+    return -1;
+  }
+
+  // Mark these pages as allocated
+  page_id_t end_page = start_page + static_cast<page_id_t>(count);
+  for (page_id_t page_id = start_page; page_id < end_page; ++page_id) {
+    page_allocated_[page_id] = true;
+  }
+
+  // Remove from free_page_ids_ in one pass - O(n)
+  auto new_end = std::remove_if(free_page_ids_.begin(),
+                                free_page_ids_.end(),
+                                [start_page, end_page](page_id_t id) {
+                                  return id >= start_page && id < end_page;
+                                });
+  free_page_ids_.erase(new_end, free_page_ids_.end());
+
+  // LOG(INFO) << "PhyPagePool: allocated " << count
+  //           << " contiguous pages from left, start_page=" << start_page;
+
+  return start_page;
+}
+
 void PhyPagePool::free_weight_pages(const std::vector<page_id_t>& page_ids) {
   if (page_ids.empty()) {
     return;
@@ -235,7 +286,7 @@ void PhyPagePool::free_weight_pages(const std::vector<page_id_t>& page_ids) {
     free_page_ids_.push_back(page_id);
   }
 
-  LOG(INFO) << "PhyPagePool: freed " << page_ids.size() << " weight pages";
+  // LOG(INFO) << "PhyPagePool: freed " << page_ids.size() << " weight pages";
 }
 
 size_t PhyPagePool::num_available() const {
