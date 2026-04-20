@@ -527,6 +527,17 @@ DEFINE_int32(rolling_load_num_rolling_slots,
              " -1 means auto (min(2, preload_count)). "
              "Must be in [-1, rolling_load_num_cached_layers].");
 
+DEFINE_bool(enable_activation_pooling,
+            false,
+            "Whether to enable xtensor for activation management.");
+
+DEFINE_int32(global_xtensor_map_rate,
+             100,
+             "Experiment only. if enabled, VRAM Coordination will be disabled. "
+             "The percentage physical pages mapping to global xtensor. "
+             "The default value is 100, which means all pages will map to "
+             "global xtensor. ");
+
 DEFINE_int64(
     phy_page_granularity_size,
     2 * 1024 * 1024,
@@ -677,6 +688,38 @@ DEFINE_bool(
     use_audio_in_video,
     false,
     "Whether to decode both audio and video when the input is a video.");
+DEFINE_bool(enable_dynamic_reserved_pages,
+            false,
+            "Whether to enable dynamic adjustment of reserved pages based on "
+            "utilization. When enabled, max_reserved_pages will be adjusted "
+            "automatically based on reserved page utilization (>80% expand, "
+            "<30% shrink).");
+
+DEFINE_int32(priority_level,
+             2,
+             "Priority level for reserved pages allocation. "
+             "1=LOW (min=4, max=16), 2=MEDIUM (min=8, max=32, default), "
+             "3=HIGH (min=16, max=64), 4=CRITICAL (min=32, max=128).");
+
+DEFINE_int32(priority_window_size,
+             5,
+             "Window size in seconds for per-model TTFT/TPOT aggregation "
+             "logging.");
+
+DEFINE_int32(priority_ttft_slo_ms,
+             std::numeric_limits<int32_t>::max(),
+             "Default TTFT SLO (ms) for priority aggregation. "
+             "Used only by priority metric aggregator.");
+
+DEFINE_int32(priority_tpot_slo_ms,
+             std::numeric_limits<int32_t>::max(),
+             "Default TPOT SLO (ms) for priority aggregation. "
+             "Used only by priority metric aggregator.");
+
+DEFINE_int32(load_model_slo_violation_rate,
+             50,
+             "Window SLO violation rate threshold (0-100). Trigger model "
+             "layer-load selection when exceeded.");
 
 // --- concurrent rec worker config ---
 DEFINE_uint32(rec_worker_max_concurrency,
@@ -711,3 +754,30 @@ DEFINE_bool(enable_xattention_one_stage,
             false,
             "Whether to force xattention one-stage decode for rec "
             "multi-round mode.");
+
+// --- watermark-based layer weight offload/restore MVP ---
+DEFINE_bool(enable_watermark_degrade_restore_mvp,
+            false,
+            "Enable watermark-driven layer weight offload/restore loop. "
+            "Offloads layers when free_pages_ratio < low_watermark, "
+            "restores when free_pages_ratio >= restore_watermark.");
+DEFINE_double(
+    layer_offload_low_watermark_ratio,
+    0.10,
+    "Physical page free ratio below which layer offload is triggered.");
+DEFINE_double(layer_offload_high_watermark_ratio,
+              0.15,
+              "Physical page free ratio above which offload loop stops.");
+DEFINE_double(
+    layer_offload_restore_watermark_ratio,
+    0.25,
+    "Physical page free ratio above which layer restore is triggered.");
+DEFINE_int32(offload_chunk_layers,
+             2,
+             "Number of transformer layers to offload per degrade iteration.");
+DEFINE_int32(load_chunk_layers,
+             2,
+             "Number of transformer layers to load per restore iteration.");
+DEFINE_int32(layer_offload_poll_interval_ms,
+             100,
+             "Polling interval (ms) for the watermark monitor thread.");

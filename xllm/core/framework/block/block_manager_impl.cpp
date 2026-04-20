@@ -16,6 +16,8 @@ limitations under the License.
 
 #include "block_manager_impl.h"
 
+#include <glog/logging.h>
+
 #include <unordered_set>
 
 #include "framework/prefix_cache/prefix_cache_factory.h"

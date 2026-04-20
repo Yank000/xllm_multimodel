@@ -73,11 +73,27 @@ class XTensorDistService : public proto::XTensorDist {
                        proto::Status* response,
                        ::google::protobuf::Closure* done) override;
 
+  void EmergencyEviction(::google::protobuf::RpcController* controller,
+                         const proto::EmergencyEvictionRequest* request,
+                         proto::Status* response,
+                         ::google::protobuf::Closure* done) override;
+
   // Get XTensor offsets for KV cache blocks (used in PD disaggregation)
   void GetXTensorOffsets(::google::protobuf::RpcController* controller,
                          const proto::GetXTensorOffsetsRequest* request,
                          proto::GetXTensorOffsetsResponse* response,
                          ::google::protobuf::Closure* done) override;
+
+  // Layer weight offload/load (master -> worker)
+  void OffloadLayerWeights(::google::protobuf::RpcController* controller,
+                           const proto::OffloadLayerWeightsRequest* request,
+                           proto::LayerWeightOpResponse* response,
+                           ::google::protobuf::Closure* done) override;
+
+  void LoadLayerWeights(::google::protobuf::RpcController* controller,
+                        const proto::LoadLayerWeightsRequest* request,
+                        proto::LayerWeightOpResponse* response,
+                        ::google::protobuf::Closure* done) override;
 
  private:
   DISALLOW_COPY_AND_ASSIGN(XTensorDistService);

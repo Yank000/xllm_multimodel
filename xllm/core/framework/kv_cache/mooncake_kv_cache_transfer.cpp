@@ -354,7 +354,6 @@ void MooncakeKVCacheTransferXTensor::register_global_xtensor(
     LOG(ERROR) << "register GlobalXTensor failed";
     return;
   }
-
   global_xtensor.set_mooncake_registered(true);
   LOG(INFO) << "register_global_xtensor success, total_size="
             << global_xtensor.total_size()

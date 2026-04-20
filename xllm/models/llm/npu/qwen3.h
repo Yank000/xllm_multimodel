@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/framework/model/model_output.h"
+#include "core/framework/xtensor/xtensor_allocator.h"
 #include "core/layers/npu/npu_qwen3_decoder_layer_impl.h"
 #include "llm_model_base.h"
 
@@ -41,6 +42,7 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
  public:
   QWen3ModelImpl(const ModelContext& context)
       : LlmModelImplBase<QWen3DecoderLayer>("qwen3", context.get_model_args()) {
+    XTensorAllocator::get_instance().enter_init_stage();
     // register submodules
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
@@ -74,6 +76,7 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
       layers_.push_back(block);
       blocks_->push_back(block);
     }
+    work_space_ = context.get_atb_workspace();
 
     // Eagle3: layer ids to capture (can be read from layers_to_capture in
     // config.json)
@@ -270,8 +273,13 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
     return ModelOutput(hidden_states);
   }
 
+  void free_atb_buffer() { work_space_->free_buffer(); }
+
  private:
   torch::Tensor viusal_pos_mask_;
+
+  std::shared_ptr<AtbWorkspace> work_space_ = nullptr;
+
   std::unordered_set<int32_t> layers_to_capture_set_;
   bool capture_aux_hidden_states_ = false;
   torch::Tensor aux_output_buffer_;

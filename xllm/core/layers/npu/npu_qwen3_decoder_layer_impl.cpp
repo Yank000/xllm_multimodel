@@ -256,7 +256,10 @@ torch::Tensor NpuQwen3DecoderLayerImpl::forward(torch::Tensor& x,
     // mstxRangeEnd(id);
     st = execute_node(prefill_node_, node_id, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
-                           << "excute prefill layer fail, error code: " << st;
+                           << " excute prefill layer fail, layer_idx="
+                           << node_id << " device=" << device_.index()
+                           << " rank=" << parallel_args_.rank()
+                           << " error_code=" << st;
   } else {
     const bool use_graph_decode_input =
         FLAGS_enable_graph && input_params.graph_buffer.tiling_data.defined();
@@ -274,7 +277,10 @@ torch::Tensor NpuQwen3DecoderLayerImpl::forward(torch::Tensor& x,
                             use_graph_decode_input);
     st = execute_node(decode_node, node_id + 1000, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
-                           << "excute decode layer fail, error code: " << st;
+                           << " excute decode layer fail, layer_idx=" << node_id
+                           << " device=" << device_.index()
+                           << " rank=" << parallel_args_.rank()
+                           << " error_code=" << st;
   }
 
   return at_placeholder_;

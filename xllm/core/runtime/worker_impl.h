@@ -37,6 +37,7 @@ limitations under the License.
 #include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
 #include "framework/xtensor/xtensor.h"
+#include "framework/xtensor/xtensor_allocator.h"
 #include "options.h"
 #include "platform/device.h"
 #include "util/threadpool.h"
@@ -66,7 +67,7 @@ class WorkerImpl {
 
   virtual bool init_model(const std::string& model_weights_path,
                           int32_t random_seed,
-                          MasterStatus master_status);
+                          int32_t master_status);
 
   virtual void load_model(std::unique_ptr<ModelLoader> loader);
 
@@ -125,7 +126,7 @@ class WorkerImpl {
   virtual folly::SemiFuture<bool> init_model_async(
       const std::string& model_weights_path,
       int32_t random_seed,
-      MasterStatus master_status);
+      int32_t master_status);
 
   virtual folly::SemiFuture<std::tuple<int64_t, int64_t>>
   estimate_kv_cache_capacity_async();
@@ -137,7 +138,7 @@ class WorkerImpl {
   virtual folly::SemiFuture<bool> allocate_kv_cache_with_transfer_async(
       const std::vector<std::vector<int64_t>>& kv_cache_shape);
 
-  virtual bool sleep(MasterStatus master_status);
+  virtual bool sleep(int32_t master_status);
 
   virtual bool wakeup(const WakeupOptions& options);
 
@@ -183,6 +184,13 @@ class WorkerImpl {
   int64_t get_active_activation_memory();
 
   Status get_status() const { return status_; }
+
+  // ---- Layer offload / restore (MVP watermark-driven) ----
+  // Dispatches to WorkerImpl's own threadpool so NPU stream context is correct.
+  folly::SemiFuture<int64_t> offload_layer_weights_async(int32_t layer_id);
+  folly::SemiFuture<int64_t> load_layer_weights_async(int32_t layer_id);
+  // Synchronize NPU stream on the Worker's own thread (blocking from caller).
+  void sync_npu_stream();
 
   // model context, includes model args, parallel args and date type etc.
   mutable ModelContext context_;

@@ -117,6 +117,10 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   }
 
   // call model executor forward to get hidden states
+#if defined(USE_NPU)
+  SET_ATB_EXECUTE_STREAM(compute_stream_, device_, context_);
+#endif
+
   auto model_output = model_executor_->forward(
       input.token_ids, input.positions, kv_caches_, input.input_params);
   if (!model_output.hidden_states.defined()) {
@@ -166,6 +170,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     if (FLAGS_enable_eplb) {
       return output;
     }
+    model_->free_atb_buffer();
     return std::nullopt;
   }
 
@@ -236,6 +241,8 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
   DeviceMonitor::get_instance().update_active_activation_memory(
       device_.index());
+
+  model_->free_atb_buffer();
 
   return output;
 }

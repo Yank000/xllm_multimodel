@@ -71,4 +71,4 @@ cc_test(
 
 # Resolve static link order between xtensor and xllm_server for this test target.
 target_link_libraries(hf_model_loader_test PRIVATE
-  "$<LINK_GROUP:RESCAN,xtensor,xllm_server>")
+  "$<LINK_GROUP:RESCAN,xtensor,request,prefix_cache,block,kv_cache,xllm_server>")

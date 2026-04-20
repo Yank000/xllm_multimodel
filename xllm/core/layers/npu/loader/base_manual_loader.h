@@ -64,6 +64,9 @@ class BaseManualLoader : public BaseLoader {
 
   // Allocate device storage (public for rolling load manager usage).
   void allocate_device_storage();
+  virtual int64_t release_weight_pages_for_this_layer() override;
+  virtual int64_t ensure_weight_pages_mapped_then_copy_from_host() override;
+  virtual bool are_weight_pages_on_device() const override;
 
  protected:
   struct WeightSlice {
@@ -78,6 +81,7 @@ class BaseManualLoader : public BaseLoader {
   void* host_pinned_storage_ = nullptr;
   void* device_storage_ = nullptr;
   uint64_t storage_size_ = 0;
+  bool weight_pages_on_device_ = true;
   std::vector<WeightSlice> weight_slices_;
   static constexpr size_t kDeviceAlignment = 64;
   static constexpr size_t kHostAlignment = 64;

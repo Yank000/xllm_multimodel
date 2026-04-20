@@ -477,6 +477,7 @@ std::shared_ptr<Request> LLMMaster::generate_request(
                          options_.enable_schedule_overlap(),
                          callback,
                          batch_callback,
+                         sp.model_id,
                          sp.decode_address,
                          call);
   req_state.sample_slots = sp.sample_slots;

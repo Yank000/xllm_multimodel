@@ -25,12 +25,17 @@ message MasterInfos {
   string model_id = 1;
   string model_path = 2;
   string master_node_addr = 3;
-  MasterStatus master_status = 4;
+  int32 master_status = 4;
   repeated string remote_addrs = 5;
   int32 nnodes = 6;
   int32 dp_size = 7;
   // Per-remote-addr weight segments (index matches remote_addrs)
   repeated MasterWeightSegmentList src_weight_segments = 8;
+  int32 priority_level = 9;
+  // Worker rank base for forked model worker window.
+  int32 worker_rank = 10;
+  optional int32 ttft_slo_ms = 11;
+  optional int32 tpot_slo_ms = 12;
 }
 
 // A single weight segment for master wakeup

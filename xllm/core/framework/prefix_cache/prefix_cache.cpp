@@ -21,12 +21,35 @@ limitations under the License.
 #include <xxHash/xxhash.h>
 
 #include <iostream>
+#include <mutex>
 #include <thread>
 
 #include "common/global_flags.h"
 #include "common/metrics.h"
+#include "global_prefix_cache_manager.h"
 
 namespace xllm {
+
+size_t PrefixCache::num_blocks() const {
+  std::lock_guard<std::mutex> lock(cache_mutex_);
+  CHECK(num_blocks_ == cached_blocks_.size()) << "check block num failed";
+  return num_blocks_;
+}
+
+std::vector<PrefixCache::CachedBlockStat> PrefixCache::get_cached_block_stats()
+    const {
+  std::lock_guard<std::mutex> lock(cache_mutex_);
+  std::vector<CachedBlockStat> stats;
+  stats.reserve(cached_blocks_.size());
+  for (const auto& [key, node] : cached_blocks_) {
+    (void)key;
+    CachedBlockStat stat;
+    stat.block_id = node->block.id();
+    stat.ref_count = node->block.ref_count();
+    stats.push_back(stat);
+  }
+  return stats;
+}
 
 void xxh3_128bits_hash(const uint8_t* pre_hash_value,
                        const Slice<int32_t>& token_ids,
@@ -60,6 +83,7 @@ void xxh3_128bits_hash(const uint8_t* pre_hash_value,
 std::vector<Block> PrefixCache::match(
     const Slice<int32_t>& token_ids,
     const Slice<Block>& existed_shared_blocks) {
+  std::lock_guard<std::mutex> lock(cache_mutex_);
   // allign tokens to block boundary
   const size_t n_tokens = round_down(token_ids.size(), block_size_);
   if (n_tokens == 0) {
@@ -97,7 +121,9 @@ std::vector<Block> PrefixCache::match(
     auto iter = cached_blocks_.find(token_hash_key);
     if (iter != cached_blocks_.end()) {
       blocks.push_back(iter->second->block);
-      lru_lst_.remove_node(iter->second);
+      if (!enable_global_lru_) {
+        lru_lst_.remove_node(iter->second);
+      }
       node_list.push_front(iter->second);
     } else {
       break;
@@ -105,9 +131,17 @@ std::vector<Block> PrefixCache::match(
   }
 
   // update LRU list
-  while (!node_list.is_empty()) {
-    Node* node = node_list.pop_front();
-    lru_lst_.push_back(node);
+  if (enable_global_lru_) {
+    // Global LRU mode: ONLY update global LRU, do NOT touch local lru_lst_
+    while (!node_list.is_empty()) {
+      Node* node = node_list.pop_front();
+      GlobalPrefixCacheManager::instance().on_node_accessed(node);
+    }
+  } else {
+    while (!node_list.is_empty()) {
+      Node* node = node_list.pop_front();
+      lru_lst_.push_back(node);
+    }
   }
 
   matched_blocks_.fetch_add(blocks.size());
@@ -146,6 +180,7 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
                            std::vector<Block>& blocks,
                            size_t existed_shared_blocks_num,
                            std::vector<XXH3Key>* insert_keys) {
+  std::lock_guard<std::mutex> lock(cache_mutex_);
   const int64_t now = absl::ToUnixMicros(absl::Now());
   // allign tokens to block boundary
   const size_t n_blocks =
@@ -163,6 +198,7 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
                                ? XXH3Key{}
                                : XXH3Key{blocks[existed_shared_blocks_num - 1]
                                              .get_immutable_hash_value()};
+  std::unordered_set<Node*> new_nodes_for_global;
 
   uint32_t block_idx = existed_shared_blocks_num;
   insert_keys->reserve(n_blocks);
@@ -181,16 +217,21 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
     auto iter = cached_blocks_.find(token_hash_key);
     if (iter != cached_blocks_.end()) {
       iter->second->last_access_time = now;
-
-      lru_lst_.remove_node(iter->second);
+      if (!enable_global_lru_) {
+        lru_lst_.remove_node(iter->second);
+      }
       node_list.push_front(iter->second);
     } else {
       Node* new_node = new Node();
 
       new_node->block = blocks[block_idx];
       new_node->last_access_time = now;
+      new_node->model_id = model_id_;
 
       node_list.push_front(new_node);
+      if (enable_global_lru_) {
+        new_nodes_for_global.insert(new_node);
+      }
 
       cached_blocks_.emplace(std::make_pair(token_hash_key, new_node));
 
@@ -202,9 +243,25 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
     ++block_idx;
   }
 
-  while (!node_list.is_empty()) {
-    Node* node = node_list.pop_front();
-    lru_lst_.push_back(node);
+  // Update LRU list
+  if (enable_global_lru_) {
+    // Global LRU mode: ONLY update global LRU
+    while (!node_list.is_empty()) {
+      Node* node = node_list.pop_front();
+
+      bool is_new = new_nodes_for_global.count(node) != 0;
+      if (is_new) {
+        GlobalPrefixCacheManager::instance().on_node_created(node);
+      } else {
+        GlobalPrefixCacheManager::instance().on_node_accessed(node);
+      }
+    }
+  } else {
+    // Local LRU mode: only update local LRU
+    while (!node_list.is_empty()) {
+      Node* node = node_list.pop_front();
+      lru_lst_.push_back(node);
+    }
   }
 
   return n_tokens;
@@ -212,6 +269,7 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
 
 size_t PrefixCache::insert(Slice<Block>& blocks,
                            std::vector<XXH3Key>* insert_keys) {
+  std::lock_guard<std::mutex> lock(cache_mutex_);
   const int64_t now = absl::ToUnixMicros(absl::Now());
   DNodeList node_list;
   XXH3Key token_hash_key;
@@ -254,7 +312,50 @@ size_t PrefixCache::insert(Slice<Block>& blocks,
 }
 
 size_t PrefixCache::evict(size_t n_blocks, std::vector<XXH3Key>* evict_keys) {
-  if (num_blocks_ == 0 || lru_lst_.is_empty()) {
+  {
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    if (num_blocks_ == 0) {
+      return 0;
+    }
+  }
+  // Global LRU: release cache_mutex_ before evict_for_model so it never nests
+  // global LRU mutex under cache_mutex_ (see GlobalPrefixCacheManager).
+  if (enable_global_lru_) {
+    std::vector<Node*> evicted_nodes;
+    size_t evicted_count = GlobalPrefixCacheManager::instance().evict_for_model(
+        n_blocks, model_id_, &evicted_nodes);
+
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+
+    if (evict_keys) {
+      evict_keys->reserve(evicted_count);
+    }
+
+    // Process evicted nodes and remove from local hash table
+    for (Node* node : evicted_nodes) {
+      XXH3Key token_hash_key(node->block.get_immutable_hash_value());
+
+      // Remove from this model's hash table
+      // (All nodes here belong to this model by design)
+      cached_blocks_.erase(token_hash_key);
+      --num_blocks_;
+
+      if (evict_keys) {
+        evict_keys->emplace_back(std::move(token_hash_key));
+      }
+
+      // NOTE: Do NOT touch local lru_lst_ in global mode
+      // Delete node (Block will be freed to this model's BlockManager)
+      delete node;
+    }
+
+    return evicted_count;
+  }
+
+  std::lock_guard<std::mutex> lock(cache_mutex_);
+
+  // Local LRU mode: evict from local LRU
+  if (lru_lst_.is_empty()) {
     return 0;
   }
 
@@ -318,6 +419,15 @@ uint32_t PrefixCache::compute_hash_keys(const Slice<int32_t>& token_ids,
   }
 
   return full_block_size;
+}
+
+void PrefixCache::remove_from_hash_table(const XXH3Key& key) {
+  std::lock_guard<std::mutex> lock(cache_mutex_);
+  auto it = cached_blocks_.find(key);
+  if (it != cached_blocks_.end()) {
+    cached_blocks_.erase(it);
+    --num_blocks_;
+  }
 }
 
 }  // namespace xllm

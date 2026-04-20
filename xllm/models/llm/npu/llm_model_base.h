@@ -20,8 +20,10 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <typeinfo>
 #include <vector>
 
@@ -119,6 +121,18 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
 
   virtual void refresh_rolling_weights() {
     decoder_layer_->refresh_rolling_weights();
+  }
+
+  virtual int64_t offload_weights() {
+    return decoder_layer_->offload_weights();
+  }
+
+  virtual int64_t load_weights_from_pinned() {
+    return decoder_layer_->load_weights_from_pinned();
+  }
+
+  virtual bool are_weight_pages_on_device() const {
+    return decoder_layer_->are_weight_pages_on_device();
   }
 
  private:
@@ -320,6 +334,7 @@ class LlmModelImplBase : public torch::nn::Module {
   }
 
   virtual void merge_and_move_pinned_host() {
+    // todo: word embed and norm need to be merged and moved to pinned host.
     npu_embed_tokens_->merge_and_move_pinned_host();
     for (int i = 0; i < layers_.size(); i++) {
       layers_[i]->merge_and_move_pinned_host();
@@ -346,6 +361,85 @@ class LlmModelImplBase : public torch::nn::Module {
     for (auto& layer : layers_) {
       layer->refresh_rolling_weights();
     }
+  }
+
+  virtual int64_t offload_non_layer_weights() {
+    int64_t pages_freed = 0;
+    int64_t embed_pages = npu_embed_tokens_->offload_weights();
+    if (embed_pages < 0) {
+      return embed_pages;
+    }
+    pages_freed += embed_pages;
+
+    int64_t norm_pages = norm_->offload_weights();
+    if (norm_pages < 0) {
+      return norm_pages;
+    }
+    pages_freed += norm_pages;
+    return pages_freed;
+  }
+
+  virtual int64_t load_non_layer_weights_from_pinned() {
+    int64_t pages_allocated = 0;
+    int64_t embed_pages = npu_embed_tokens_->load_weights_from_pinned();
+    if (embed_pages < 0) {
+      return embed_pages;
+    }
+    pages_allocated += embed_pages;
+
+    int64_t norm_pages = norm_->load_weights_from_pinned();
+    if (norm_pages < 0) {
+      return norm_pages;
+    }
+    pages_allocated += norm_pages;
+    return pages_allocated;
+  }
+
+  virtual int64_t load_non_layer_weights() {
+    return load_non_layer_weights_from_pinned();
+  }
+
+  virtual int64_t offload_layer_weights(int32_t layer_id) {
+    int64_t pages_freed = layers_[layer_id]->offload_weights();
+    if (pages_freed < 0) {
+      return pages_freed;
+    }
+    // Tail-first offload reaches layer_id=0 when transitioning 1 -> 0 layer.
+    if (layer_id == 0) {
+      int64_t non_layer_pages = offload_non_layer_weights();
+      if (non_layer_pages < 0) {
+        return non_layer_pages;
+      }
+      pages_freed += non_layer_pages;
+    }
+    return pages_freed;
+  }
+
+  virtual int64_t load_layer_weights(int32_t layer_id) {
+    int64_t pages_allocated = 0;
+    // Tail-first load starts from layer_id=0 when transitioning 0 -> 1 layer.
+    if (layer_id == 0) {
+      int64_t non_layer_pages = load_non_layer_weights_from_pinned();
+      if (non_layer_pages < 0) {
+        return non_layer_pages;
+      }
+      pages_allocated += non_layer_pages;
+    }
+    int64_t layer_pages = layers_[layer_id]->load_weights_from_pinned();
+    if (layer_pages < 0) {
+      return layer_pages;
+    }
+    return pages_allocated + layer_pages;
+  }
+
+  virtual bool are_weight_pages_on_device() const {
+    if (!npu_embed_tokens_->are_weight_pages_on_device() ||
+        !norm_->are_weight_pages_on_device()) {
+      return false;
+    }
+    return std::all_of(layers_.begin(), layers_.end(), [](const auto& l) {
+      return l->are_weight_pages_on_device();
+    });
   }
 
   virtual layer::NpuWordEmbedding get_npu_word_embedding() {
@@ -535,6 +629,65 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
   virtual void reload_model_weights_from_device() {
     model_->reload_weights_from_device();
     npu_lm_head_->reload_weights_from_device();
+  }
+
+  virtual int64_t offload_layer_weights(int32_t layer_id) {
+    if constexpr (detail::has_offload_layer_weights<LlmModelType>::value) {
+      int64_t pages_freed = model_->offload_layer_weights(layer_id);
+      if (pages_freed < 0) {
+        LOG(ERROR) << "Failed to offload weights for layer " << layer_id
+                   << " of model type: " << typeid(LlmModelType).name();
+        return pages_freed;
+      }
+      if (layer_id == 0) {
+        int64_t lm_head_pages = npu_lm_head_->offload_weights();
+        if (lm_head_pages < 0) {
+          LOG(ERROR) << "Failed to offload lm head weights for model type: "
+                     << typeid(LlmModelType).name();
+          return lm_head_pages;
+        }
+        pages_freed += lm_head_pages;
+      }
+      return pages_freed;
+    } else {
+      LOG(ERROR) << "offload_layer_weights is not implemented for model type: "
+                 << typeid(LlmModelType).name();
+    }
+    return 0;
+  }
+
+  virtual int64_t load_layer_weights(int32_t layer_id) {
+    if constexpr (detail::has_load_layer_weights<LlmModelType>::value) {
+      int64_t pages_allocated = model_->load_layer_weights(layer_id);
+      if (pages_allocated < 0) {
+        LOG(ERROR) << "Failed to load weights for layer " << layer_id
+                   << " of model type: " << typeid(LlmModelType).name();
+        return pages_allocated;
+      }
+      if (layer_id == 0) {
+        int64_t lm_head_pages = npu_lm_head_->load_weights_from_pinned();
+        if (lm_head_pages < 0) {
+          LOG(ERROR) << "Failed to load lm head weights for model type: "
+                     << typeid(LlmModelType).name();
+          return lm_head_pages;
+        }
+        pages_allocated += lm_head_pages;
+      }
+      return pages_allocated;
+    } else {
+      LOG(ERROR) << "load_layer_weights is not implemented for model type: "
+                 << typeid(LlmModelType).name();
+    }
+    return 0;
+  }
+
+  virtual void free_atb_buffer() {
+    if constexpr (detail::has_free_atb_buffer<LlmModelType>::value) {
+      model_->free_atb_buffer();
+    } else {
+      LOG(FATAL) << "free_atb_buffer is not implemented for model type: "
+                 << typeid(LlmModelType).name();
+    }
   }
 
   virtual void prepare_expert_weight(int32_t layer_id,

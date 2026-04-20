@@ -72,6 +72,7 @@ struct RequestState final {
                bool enable_schedule_overlap,
                const OutputFunc& output_func,
                const OutputsFunc& outputs_func,
+               const std::string& model_id = "",
                const std::string& decode_address = "",
                std::optional<Call*> call = std::nullopt);
 
@@ -90,6 +91,7 @@ struct RequestState final {
                bool enable_schedule_overlap,
                const OutputFunc& output_func,
                const OutputsFunc& outputs_func,
+               const std::string& model_id = "",
                const std::string& decode_address = "");
 
   RequestState(const std::string& prompt,
@@ -107,6 +109,7 @@ struct RequestState final {
                bool enable_schedule_overlap,
                const OutputFunc& output_func,
                const OutputsFunc& outputs_func,
+               const std::string& model_id = "",
                const std::string& decode_address = "");
 
   // for profiling run, only provide prompt tokens
@@ -147,6 +150,8 @@ struct RequestState final {
 
   // decode address.
   std::string decode_address;
+
+  std::string model_id;
 
   torch::Tensor input_embedding;
 

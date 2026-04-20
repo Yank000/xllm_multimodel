@@ -31,6 +31,7 @@ limitations under the License.
 
 #include "api_service/stream_output_parser.h"
 #include "api_service/utils.h"
+#include "common/global_flags.h"
 #include "core/common/instance_name.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/llm_master.h"
@@ -38,6 +39,7 @@ limitations under the License.
 #include "core/distributed_runtime/vlm_master.h"
 #include "core/framework/request/rec_type.h"
 #include "core/framework/request/request_params.h"
+#include "core/framework/xtensor/page_allocator.h"
 #include "core/util/utils.h"
 #include "core/util/uuid.h"
 #include "mm_service_utils.h"
@@ -479,7 +481,8 @@ ChatServiceImpl::ChatServiceImpl(LLMMaster* master,
       reasoning_parser_format_(
           master_->options().reasoning_parser().value_or("")) {
   CHECK(master_ != nullptr);
-  add_model_master(models[0], master);
+  llm_model_masters_[models[0]] = std::make_unique<LLMModelMasters>();
+  llm_model_masters_[models[0]]->masters.push_back(master);
 }
 
 ChatServiceImpl::ChatServiceImpl(RecMaster* master,
@@ -497,17 +500,12 @@ void ChatServiceImpl::add_model_master(const std::string& model,
                                        LLMMaster* master) {
   CHECK(master != nullptr);
   std::unique_lock<std::shared_mutex> lock(llm_model_to_master_mutex_);
-  llm_model_to_master_.insert_or_assign(model, master);
-  models_.insert(model);
-}
-
-LLMMaster* ChatServiceImpl::get_model_master(const std::string& model) const {
-  std::shared_lock<std::shared_mutex> lock(llm_model_to_master_mutex_);
-  auto it = llm_model_to_master_.find(model);
-  if (it == llm_model_to_master_.end()) {
-    return nullptr;
+  auto& slot = llm_model_masters_[model];
+  if (!slot) {
+    slot = std::make_unique<LLMModelMasters>();
   }
-  return it->second;
+  slot->masters.push_back(master);
+  models_.insert(model);
 }
 
 void ChatServiceImpl::process_rec_chat_request(std::shared_ptr<ChatCall> call) {
@@ -732,11 +730,57 @@ void ChatServiceImpl::process_async_impl(std::shared_ptr<ChatCall> call) {
     process_rec_chat_request(call);
     return;
   }
-
-  LLMMaster* master = get_model_master(model);
-  if (unlikely(master == nullptr)) {
+  if (unlikely(!models_.contains(model))) {
     call->finish_with_error(StatusCode::UNKNOWN, "Model not supported");
     return;
+  }
+  auto it_mm = llm_model_masters_.find(model);
+  if (it_mm == llm_model_masters_.end() || it_mm->second->masters.empty()) {
+    call->finish_with_error(StatusCode::UNKNOWN, "Model not supported");
+    return;
+  }
+  auto& mm = *it_mm->second;
+  LLMMaster* master = nullptr;
+  const size_t total = mm.masters.size();
+  const size_t start = mm.rr.fetch_add(1, std::memory_order_relaxed);
+  auto& pa = PageAllocator::get_instance();
+  for (size_t i = 0; i < total; ++i) {
+    LLMMaster* candidate = mm.masters[(start + i) % total];
+    if (candidate == nullptr) {
+      continue;
+    }
+    if (FLAGS_enable_xtensor && pa.is_initialized() &&
+        pa.is_model_schedule_blocked(candidate->options().model_id())) {
+      continue;
+    }
+    master = candidate;
+    break;
+  }
+  if (unlikely(master == nullptr)) {
+    if (FLAGS_enable_xtensor && pa.is_initialized()) {
+      if (auto* mgr = pa.get_layer_offload_manager(); mgr != nullptr) {
+        auto selected_model_id =
+            mgr->trigger_load_for_base_model(model, "no_available_replica");
+        if (selected_model_id.has_value()) {
+          for (LLMMaster* candidate : mm.masters) {
+            if (candidate != nullptr &&
+                candidate->options().model_id() == selected_model_id.value()) {
+              master = candidate;
+              break;
+            }
+          }
+        }
+      }
+    }
+    if (master != nullptr) {
+      LOG(INFO) << "Route request to selected degraded replica model_id="
+                << master->options().model_id();
+    } else {
+      call->finish_with_error(
+          StatusCode::UNAVAILABLE,
+          "No available model replica (all replicas are degraded).");
+      return;
+    }
   }
   // LLMMaster path (existing logic)
   // Check if the request is being rate-limited or model is sleeping.
@@ -751,6 +795,10 @@ void ChatServiceImpl::process_async_impl(std::shared_ptr<ChatCall> call) {
           "The number of concurrent requests has reached the limit.");
     }
     return;
+  }
+  const std::string master_model_id = master->options().model_id();
+  if (FLAGS_enable_xtensor && pa.is_initialized()) {
+    pa.mark_model_request_begin(master_model_id);
   }
 
   RequestParams request_params(
@@ -825,6 +873,7 @@ void ChatServiceImpl::process_async_impl(std::shared_ptr<ChatCall> call) {
       [call,
        model,
        master = master,
+       master_model_id,
        stream = std::move(saved_streaming),
        include_usage = include_usage,
        first_message_sent = std::unordered_set<size_t>(),
@@ -843,6 +892,11 @@ void ChatServiceImpl::process_async_impl(std::shared_ptr<ChatCall> call) {
             // Reduce the number of concurrent requests when a
             // request is finished with error.
             master->get_rate_limiter()->decrease_one_request();
+            if (FLAGS_enable_xtensor &&
+                PageAllocator::get_instance().is_initialized()) {
+              PageAllocator::get_instance().mark_model_request_end(
+                  master_model_id);
+            }
 
             return call->finish_with_error(status.code(), status.message());
           }
@@ -853,6 +907,11 @@ void ChatServiceImpl::process_async_impl(std::shared_ptr<ChatCall> call) {
         if (req_output.finished || req_output.cancelled ||
             req_output.finished_on_prefill_instance) {
           master->get_rate_limiter()->decrease_one_request();
+          if (FLAGS_enable_xtensor &&
+              PageAllocator::get_instance().is_initialized()) {
+            PageAllocator::get_instance().mark_model_request_end(
+                master_model_id);
+          }
         }
 
         if (stream) {

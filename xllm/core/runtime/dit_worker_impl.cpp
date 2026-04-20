@@ -94,7 +94,7 @@ bool DiTWorkerImpl::init_model(ModelContext& context) {
 
 bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
                                int32_t random_seed,
-                               MasterStatus master_status) {
+                               int32_t master_status) {
   CHECK(dit_model_ == nullptr) << "Model is already initialized.";
 
   // set same random seed for all worker
@@ -136,7 +136,7 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
 folly::SemiFuture<bool> DiTWorkerImpl::init_model_async(
     const std::string& model_weights_path,
     int32_t random_seed,
-    MasterStatus master_status) {
+    int32_t master_status) {
   auto promise = std::make_shared<folly::Promise<bool>>();
   auto future = promise->getSemiFuture();
   threadpool_.schedule([this,

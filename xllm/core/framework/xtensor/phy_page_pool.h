@@ -17,11 +17,15 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <atomic>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
 
+#include "global_xtensor.h"
+#include "page_allocator.h"
 #include "phy_page.h"
 
 namespace xllm {
@@ -60,20 +64,13 @@ class PhyPagePool {
   // If partial allocation fails, all acquired pages are returned to pool
   std::vector<std::unique_ptr<PhyPage>> batch_get(size_t count);
 
-  // Find and allocate contiguous pages from right side (for weight allocation)
-  // Returns the starting page_id of the contiguous segment, or -1 if not found
-  // The pages are marked as allocated but ownership remains in all_pages_
-  page_id_t allocate_contiguous_from_right(size_t count);
+  // Allocate contiguous virtual region from activation GlobalXTensor.
+  // Reserved for activation arena growth.
+  void* allocate_contiguous(size_t count, bool is_activation, bool is_init);
 
-  // Allocate non-contiguous pages from right side (fallback for fragmented
-  // pool) Returns page_ids of allocated pages (may not be contiguous) Returns
-  // empty vector if not enough pages available
-  std::vector<page_id_t> allocate_pages_from_right(size_t count);
-
-  // Free pages that were allocated via allocate_contiguous_from_right
-  // or allocate_pages_from_right
-  // page_ids: vector of page_ids to free
-  void free_weight_pages(const std::vector<page_id_t>& page_ids);
+  // Free contiguous virtual region back to activation GlobalXTensor.
+  // Reserved for activation arena shrink.
+  void free_contiguous(size_t addr, size_t count);
 
   // Put a physical page back to the pool
   void put(std::unique_ptr<PhyPage> page);
@@ -90,21 +87,32 @@ class PhyPagePool {
   // Get the device
   const torch::Device& device() const { return device_; }
 
+  // For TP: set callbacks so this process can report consume/release to master
+  // (only used when PageAllocator is not initialized on this process)
+  void set_report_to_master(int32_t my_worker_rank);
   // Get the zero page (for initializing virtual memory)
   // The returned pointer is owned by PhyPagePool, do not delete it
   PhyPage* get_zero_page();
 
   // ============== Global XTensor Support ==============
 
-  // Get all pages as raw pointers for GlobalXTensor mapping
-  // Ownership remains with pool, pages are NOT marked as allocated
-  const std::vector<PhyPage*>& get_all_pages() const;
+  // Get specified number of pages as raw pointers (PhyPage*). Ownership
+  // remains with pool. Fills out with up to count pointers.
+  // - When local free list is empty (e.g. initial call): assigns first count
+  //   pages to out and puts the rest into local free list for get/batch_get.
+  // - Otherwise: takes count pages from local free list (and global_xtensor
+  //   if needed), fills out with those pointers.
+  std::vector<PhyPage*> get_pages(size_t count);
 
  private:
   PhyPagePool() = default;
-  ~PhyPagePool() = default;
+  ~PhyPagePool();
   PhyPagePool(const PhyPagePool&) = delete;
   PhyPagePool& operator=(const PhyPagePool&) = delete;
+
+  bool init_shared_report_counter_if_needed(int32_t worker_rank);
+  void report_consume_via_shared_counter(size_t count);
+  void report_release_via_shared_counter(size_t count);
 
   bool initialized_ = false;
   torch::Device device_{torch::kCPU};
@@ -118,15 +126,26 @@ class PhyPagePool {
   // Raw pointers to all pages (for GlobalXTensor, filled once at init)
   std::vector<PhyPage*> all_page_ptrs_;
 
-  // Free page indices (page_ids of pages available for allocation)
-  // For KV cache allocation, pages are taken from left to right.
-  std::deque<page_id_t> free_page_ids_;
-
-  // Track which pages are allocated (for segment management)
-  std::vector<bool> page_allocated_;
-
   // Zero page for initializing virtual memory (owned by pool)
   std::unique_ptr<PhyPage> zero_page_;
+
+  std::atomic<size_t> num_available_{0};
+
+  // Local free list: page_ids of the (1-map_rate) portion; get/batch_get
+  // allocate from here first, put/batch_put return here (global_xtensor only
+  // shrinks).
+  std::deque<page_id_t> local_free_page_ids_;
+  size_t get_miss_time = 0;
+  size_t get_miss_count = 0;
+  size_t transfer_page_count = 0;
+
+  // For TP: report consume/release to master when this process is not master
+  int32_t report_my_worker_rank_ = -1;
+  std::function<void(int32_t, size_t)> report_consume_cb_;
+  std::function<void(int32_t, size_t)> report_release_cb_;
+  int shared_report_counter_fd_ = -1;
+  uint64_t* shared_report_counter_ptr_ = nullptr;
+  size_t shared_report_counter_local_used_ = 0;
 };
 
 }  // namespace xllm

@@ -111,7 +111,7 @@ bool RemoteWorker::unlink_d2d(const std::string& remote_addr) {
 
 bool RemoteWorker::init_model(const std::string& model_weights_path,
                               int32_t random_seed,
-                              MasterStatus master_status) {
+                              int32_t master_status) {
   return channel_->init_model(model_weights_path, random_seed, master_status);
 }
 
@@ -201,7 +201,7 @@ folly::SemiFuture<folly::Unit> RemoteWorker::process_group_test_async() {
 folly::SemiFuture<bool> RemoteWorker::init_model_async(
     const std::string& model_weights_path,
     int32_t random_seed,
-    MasterStatus master_status) {
+    int32_t master_status) {
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this,
@@ -349,7 +349,7 @@ folly::SemiFuture<int64_t> RemoteWorker::get_active_activation_memory_async() {
 
 bool RemoteWorker::check_health() { return channel_->check_health(); }
 
-folly::SemiFuture<bool> RemoteWorker::sleep_async(MasterStatus master_status) {
+folly::SemiFuture<bool> RemoteWorker::sleep_async(int32_t master_status) {
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule(

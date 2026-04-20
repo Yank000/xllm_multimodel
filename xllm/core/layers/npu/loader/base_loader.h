@@ -45,6 +45,12 @@ class BaseLoader {
   virtual void reload_weights_from_device() {};
   virtual void refresh_rolling_weights() {};
 
+  // Per-layer weight offload/load (no-op for non-Manual loaders).
+  // Returns pages actually unmapped / newly mapped from pool, or -1 on failure.
+  virtual int64_t release_weight_pages_for_this_layer() { return 0; }
+  virtual int64_t ensure_weight_pages_mapped_then_copy_from_host() { return 0; }
+  virtual bool are_weight_pages_on_device() const { return true; }
+
   torch::Dtype string2dtype(const std::string& dtype_str);
 
   void correct_tensor_dtype(torch::Tensor& tensor,

@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "base_manual_loader.h"
 
+#include <glog/logging.h>
+
 #include "core/common/global_flags.h"
 #include "framework/xtensor/xtensor_allocator.h"
 
@@ -86,14 +88,16 @@ void BaseManualLoader::allocate_device_storage() {
 void BaseManualLoader::reload_weights() {
   allocate_device_storage();
   copy_weights_to_device_async();
+  c10_npu::getCurrentNPUStream().synchronize();
   init_device_at_weights();
+  weight_pages_on_device_ = true;
 }
 
 void BaseManualLoader::reload_weights_from_device() {
   // D2D path: weights already transferred to GlobalXTensor weight region.
-  // Call allocate_weight to get the pointer into the pre-allocated region.
   allocate_device_storage();
   init_device_at_weights();
+  weight_pages_on_device_ = true;
 }
 
 void BaseManualLoader::init_weight_slices() {
@@ -246,6 +250,44 @@ void BaseManualLoader::release_device_storage() {
   device_storage_ = nullptr;
 }
 
+bool BaseManualLoader::are_weight_pages_on_device() const {
+  return weight_pages_on_device_;
+}
+
+int64_t BaseManualLoader::ensure_weight_pages_mapped_then_copy_from_host() {
+  if (device_storage_ == nullptr || storage_size_ == 0) {
+    return 0;
+  }
+  auto& allocator = XTensorAllocator::get_instance();
+  int64_t pages_mapped = allocator.ensure_weight_pages_mapped_region(
+      model_id_, device_storage_, storage_size_);
+  if (pages_mapped < 0) {
+    LOG(ERROR) << "ensure_weight_pages_mapped_region failed for model "
+               << model_id_;
+    return -1;
+  }
+  copy_weights_to_device_async();
+  c10_npu::getCurrentNPUStream().synchronize();
+  init_device_at_weights();
+  weight_pages_on_device_ = true;
+  return pages_mapped;
+}
+
+int64_t BaseManualLoader::release_weight_pages_for_this_layer() {
+  if (device_storage_ == nullptr || storage_size_ == 0) {
+    return 0;
+  }
+  auto& allocator = XTensorAllocator::get_instance();
+  size_t n =
+      allocator.unmap_weight_region(model_id_, device_storage_, storage_size_);
+  size_t reclaimed_zero_ref =
+      allocator.reclaim_mapped_zero_ref_weight_pages(model_id_);
+  if (n > 0) {
+    weight_pages_on_device_ = false;
+  }
+  return static_cast<int64_t>(n + reclaimed_zero_ref);
+}
+
 void BaseManualLoader::release_host_storage() {
   if (host_pinned_storage_ == nullptr) {
     return;
@@ -266,7 +308,15 @@ BaseManualLoader::BaseManualLoader(uint64_t weight_count,
 void BaseManualLoader::merge_loaded_weights() {
   merge_host_at_weights();
   init_weight_slices();
-  copy_weights_to_device();
+  if (FLAGS_enable_watermark_degrade_restore_mvp && FLAGS_enable_xtensor) {
+    // Fill host_pinned for later load_layer_weights restore
+    copy_weights_to_pinned_host();
+    allocate_device_storage();
+    copy_weights_to_device_async();
+    c10_npu::getCurrentNPUStream().synchronize();
+  } else {
+    copy_weights_to_device();
+  }
   init_device_at_weights();
 }
 

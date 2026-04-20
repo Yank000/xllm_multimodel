@@ -144,6 +144,13 @@ class CausalLM : public torch::nn::Module {
   virtual void reload_model_weights() { NOT_IMPLEMENTED(); }
 
   virtual void reload_model_weights_from_device() { NOT_IMPLEMENTED(); }
+
+  virtual void free_atb_buffer() { NOT_IMPLEMENTED(); }
+
+  // Per-layer weight offload/restore (no-op for models that don't support it).
+  // Returns pages unmapped / newly mapped, or 0 on failure.
+  virtual int64_t offload_layer_weights(int32_t /*layer_id*/) { return 0; }
+  virtual int64_t load_layer_weights(int32_t /*layer_id*/) { return 0; }
 };
 
 template <typename Model>
@@ -258,6 +265,14 @@ class CausalLMImpl : public CausalLM {
     }
   }
 
+  void free_atb_buffer() override {
+    if constexpr (detail::has_free_atb_buffer<Model>::value) {
+      model_->free_atb_buffer();
+    } else {
+      CausalLM::free_atb_buffer();
+    }
+  }
+
   bool init_or_refresh_rolling_runtime(Stream* load_stream,
                                        Stream* compute_stream,
                                        int32_t num_cached_slots,
@@ -277,6 +292,26 @@ class CausalLMImpl : public CausalLM {
                                                      model_id);
   }
 #endif
+
+  int64_t offload_layer_weights(int32_t layer_id) override {
+    if constexpr (detail::has_offload_layer_weights<Model>::value) {
+      return model_->offload_layer_weights(layer_id);
+    } else {
+      LOG(FATAL) << "offload_layer_weights is not implemented for model="
+                 << model_->name();
+    }
+    return 0;
+  }
+
+  int64_t load_layer_weights(int32_t layer_id) override {
+    if constexpr (detail::has_load_layer_weights<Model>::value) {
+      return model_->load_layer_weights(layer_id);
+    } else {
+      LOG(FATAL) << "load_layer_weights is not implemented for model="
+                 << model_->name();
+    }
+    return 0;
+  }
 
   layer::LmHead get_lm_head() override {
     if constexpr (detail::has_get_lm_head<Model>::value) {

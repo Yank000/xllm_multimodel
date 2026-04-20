@@ -29,6 +29,12 @@ limitations under the License.
 #include "framework/request/request_params.h"
 namespace xllm {
 
+enum MasterStaus : int32_t {
+  WAKEUP = 0,
+  LIGHT_SLEEP = 1,
+  DEEP_SLEEP = 2,
+};
+
 class Master {
  public:
   explicit Master(const Options& options, EngineType type);
@@ -50,11 +56,11 @@ class Master {
     return false;
   }
 
-  MasterStatus get_master_status() const { return master_status_; }
+  int32_t get_master_status() const { return master_status_; }
 
-  bool is_sleeping() const { return master_status_ != MasterStatus::WAKEUP; }
+  bool is_sleeping() const { return master_status_ != 0; }
 
-  void set_master_status(MasterStatus master_status) {
+  void set_master_status(int32_t master_status) {
     master_status_ = master_status;
   }
 
@@ -64,7 +70,7 @@ class Master {
   Options options_;
   std::unique_ptr<Engine> engine_;
   RateLimiter rate_limiter_;
-  MasterStatus master_status_{MasterStatus::WAKEUP};
+  int32_t master_status_{0};
 };
 
 std::unique_ptr<Master> create_master(const std::string& backend,

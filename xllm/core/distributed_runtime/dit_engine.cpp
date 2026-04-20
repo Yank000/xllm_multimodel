@@ -86,7 +86,7 @@ bool DiTEngine::init_model() {
   futures.reserve(worker_clients_num_);
   for (auto& worker : worker_clients_) {
     futures.push_back(worker->init_model_async(
-        model_path, FLAGS_random_seed, MasterStatus::WAKEUP));
+        model_path, FLAGS_random_seed, 0 /* master_status */));
   }
 
   // wait for all futures to complete

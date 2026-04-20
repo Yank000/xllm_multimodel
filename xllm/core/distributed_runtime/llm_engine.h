@@ -55,7 +55,7 @@ class LLMEngine : public Engine {
 
   const runtime::Options& options() const { return options_; }
 
-  bool init(MasterStatus master_status) override;
+  bool init(int32_t master_status) override;
 
   void update_last_step_result(std::vector<Batch>& batch) override;
 
@@ -121,7 +121,7 @@ class LLMEngine : public Engine {
 
   std::shared_ptr<DistManager> get_dist_manager() { return dist_manager_; };
 
-  bool sleep(MasterStatus master_status) override;
+  bool sleep(int32_t master_status) override;
 
   bool wakeup(const WakeupOptions& options) override;
 
@@ -137,7 +137,7 @@ class LLMEngine : public Engine {
   friend class SpeculativeEngine;
   // setup workers internal
   void setup_workers(const runtime::Options& options);
-  bool init_model(MasterStatus master_status = MasterStatus::WAKEUP);
+  bool init_model(int32_t master_status = WAKEUP);
   int64_t get_effective_xtensor_weight_size(
       const ModelLoader& model_loader) const;
   Engine::KVCacheCapacity estimate_kv_cache_capacity();
@@ -174,6 +174,7 @@ class LLMEngine : public Engine {
   uint32_t worker_clients_num_;
   uint32_t dp_local_tp_size_;
   uint32_t dp_local_size_;
+  int32_t worker_rank_base_ = 0;
 
   // For multi-node serving
   // engine brpc server, all workers connect to engine_server_,

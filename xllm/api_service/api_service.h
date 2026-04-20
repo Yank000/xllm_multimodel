@@ -18,6 +18,7 @@ limitations under the License.
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "anthropic_service_impl.h"
 #include "chat_service_impl.h"
@@ -178,9 +179,16 @@ class APIService : public proto::XllmAPIService {
   bool add_model_master_if_absent(const std::string& model_id, Master* master);
   Master* get_model_master(const std::string& model_id) const;
 
+  // - model_id = "base#N"  => 精确作用于运行时实例ID（base#N），缺省为0
+  bool ResolveD2DTargetMasters(const std::string& raw_model_id,
+                               std::vector<Master*>* targets,
+                               std::string* err_msg);
+
+  std::unordered_map<std::string, std::vector<Master*>> masters_;
+  std::unordered_map<std::string, Master*> master_instances_;
+
   Master* master_;
   mutable std::shared_mutex masters_mutex_;
-  std::unordered_map<std::string, Master*> masters_;
   std::unique_ptr<AnthropicServiceImpl> anthropic_service_impl_;
   std::unique_ptr<CompletionServiceImpl> completion_service_impl_;
   std::unique_ptr<SampleServiceImpl> sample_service_impl_;

@@ -157,7 +157,11 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
     if (!weight_transfer_->initialize()) {
       LOG(ERROR) << "Failed to initialize MooncakeWeightTransfer";
     }
-    if (!weight_transfer_->register_global_xtensor()) {
+    XTensorAllocator::get_instance().set_mooncake_weight_register_fn(
+        [this](const std::string& mid) {
+          return weight_transfer_->register_model_weight_slice(mid);
+        });
+    if (!weight_transfer_->register_weight_xtensor()) {
       LOG(ERROR) << "Failed to register GlobalXTensor";
     }
   }
@@ -361,6 +365,7 @@ bool WorkerImpl::allocate_kv_cache(
 
   init_hierarchy_kv_cache_transfer();
   status_ = Status::READY;
+  XTensorAllocator::get_instance().exit_init_stage();
   return true;
 }
 
@@ -769,7 +774,7 @@ folly::SemiFuture<folly::Unit> WorkerImpl::process_group_test_async() {
 folly::SemiFuture<bool> WorkerImpl::init_model_async(
     const std::string& model_weights_path,
     int32_t random_seed,
-    MasterStatus master_status) {
+    int32_t master_status) {
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this,
@@ -785,13 +790,13 @@ folly::SemiFuture<bool> WorkerImpl::init_model_async(
   return future;
 }
 
-bool WorkerImpl::sleep(MasterStatus master_status) {
+bool WorkerImpl::sleep(int32_t master_status) {
   // The memory for kvcache and model weights from hbm is released by xtensor;
-  if (master_status == MasterStatus::LIGHT_SLEEP) {
+  if (master_status == LIGHT_SLEEP) {
     // only load model weights to host memory.
     auto model_loader = ModelLoader::create(model_weights_path_);
     model_->lazy_load_model(std::move(model_loader));
-  } else if (master_status == MasterStatus::DEEP_SLEEP) {
+  } else if (master_status == DEEP_SLEEP) {
     // only release model weights from host memory.
     model_->free_model_weights();
   }
@@ -802,112 +807,100 @@ bool WorkerImpl::sleep(MasterStatus master_status) {
 bool WorkerImpl::wakeup(const WakeupOptions& options) {
   if (!options.remote_addrs.empty()) {
 #if defined(USE_NPU)
-    return wakeup_from_remote_weights(options);
-#endif
-    LOG(ERROR) << "Remote weight wakeup only supports npu device.";
-    return false;
-  }
+    // Prefer segment-based transfer if available, fallback to legacy offsets
+    bool use_segments = !options.src_weight_segments.empty();
 
-  return wakeup_local(options);
-}
-
-bool WorkerImpl::wakeup_local(const WakeupOptions& options) {
-  if (options.master_status == MasterStatus::LIGHT_SLEEP) {
-#if defined(USE_NPU)
-    if (FLAGS_enable_rolling_load && !is_spec_draft_) {
-      // Reuse rolling runtime state and refresh rolling initialization on
-      // wakeup without re-reading checkpoint in LIGHT_SLEEP.
-      if (!init_rolling_runtime_state()) {
-        LOG(ERROR) << "Failed to initialize rolling runtime state on wakeup";
+    if (use_segments) {
+      if (options.src_weight_segments.size() != options.remote_addrs.size()) {
+        LOG(ERROR) << "remote_addrs and src_weight_segments size mismatch: "
+                   << options.remote_addrs.size() << " vs "
+                   << options.src_weight_segments.size();
         return false;
       }
     } else {
-      model_->reload_model_weights();
-    }
-#else
-    model_->reload_model_weights();
-#endif
-  } else if (options.master_status == MasterStatus::DEEP_SLEEP) {
-    auto model_loader = ModelLoader::create(model_weights_path_);
-    this->load_model(std::move(model_loader));
-  }
-  return true;
-}
-
-#if defined(USE_NPU)
-bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
-  // Prefer segment-based transfer if available, fallback to legacy offsets.
-  if (FLAGS_enable_rolling_load) {
-    LOG(ERROR)
-        << "Remote weight wakeup does not support FLAGS_enable_rolling_load";
-    return false;
-  }
-
-  bool use_segments = !options.src_weight_segments.empty();
-  if (use_segments) {
-    if (options.src_weight_segments.size() != options.remote_addrs.size()) {
-      LOG(ERROR) << "remote_addrs and src_weight_segments size mismatch: "
-                 << options.remote_addrs.size() << " vs "
-                 << options.src_weight_segments.size();
-      return false;
-    }
-  } else {
-    // Legacy single-offset mode (backward compatibility).
-    if (options.src_weight_segments.empty() &&
-        options.remote_addrs.size() > 0) {
-      LOG(ERROR) << "No weight segments provided for remote wakeup";
-      return false;
-    }
-  }
-
-  auto& allocator = XTensorAllocator::get_instance();
-  auto* tensors = allocator.get_model_tensors(options_.model_id());
-  if (!tensors || tensors->weight_base_ptr == nullptr ||
-      tensors->weight_num_pages == 0) {
-    LOG(ERROR) << "Weight region not initialized for model "
-               << options_.model_id();
-    return false;
-  }
-
-  auto& global_xtensor = GlobalXTensor::get_instance();
-  if (!global_xtensor.is_initialized()) {
-    LOG(ERROR) << "GlobalXTensor not initialized";
-    return false;
-  }
-  if (!weight_transfer_) {
-    LOG(ERROR) << "MooncakeWeightTransfer not initialized";
-    return false;
-  }
-
-  // Destination is always contiguous (local allocation).
-  uint64_t dst_base_offset =
-      reinterpret_cast<uintptr_t>(tensors->weight_base_ptr) -
-      reinterpret_cast<uintptr_t>(global_xtensor.base_vaddr());
-  for (size_t i = 0; i < options.remote_addrs.size(); ++i) {
-    const auto& segments = options.src_weight_segments[i];
-    uint64_t dst_offset = dst_base_offset;
-    // Pull each segment from source, writing sequentially to destination.
-    for (const auto& seg : segments) {
-      if (!weight_transfer_->pull_weights(
-              options.remote_addrs[i], seg.offset, dst_offset, seg.size)) {
-        LOG(ERROR) << "Failed to pull remote weight segment from "
-                   << options.remote_addrs[i] << ", src_offset=" << seg.offset
-                   << ", size=" << seg.size;
+      // Legacy single-offset mode (backward compatibility)
+      if (options.src_weight_segments.empty() &&
+          options.remote_addrs.size() > 0) {
+        LOG(ERROR) << "No weight segments provided for remote wakeup";
         return false;
       }
-      dst_offset += seg.size;
     }
+
+    if (!FLAGS_enable_xtensor) {
+      LOG(ERROR) << "Remote weight wakeup requires FLAGS_enable_xtensor";
+      return false;
+    }
+
+    auto& allocator = XTensorAllocator::get_instance();
+    auto* tensors = allocator.get_model_tensors(options_.model_id());
+    if (!tensors || tensors->weight_base_ptr == nullptr ||
+        tensors->weight_num_pages == 0) {
+      LOG(ERROR) << "Weight region not initialized for model "
+                 << options_.model_id();
+      return false;
+    }
+
+    if (!weight_transfer_) {
+      LOG(ERROR) << "MooncakeWeightTransfer not initialized";
+      return false;
+    }
+
+    if (allocator.get_model_mooncake_weight_buffer_index(options_.model_id()) <
+        0) {
+      LOG(ERROR) << "Mooncake weight buffer not registered for model "
+                 << options_.model_id();
+      return false;
+    }
+
+    // Offsets are relative to each side's Mooncake-registered slice for this
+    // model (symmetric buffer ordinal on both peers).
+    for (size_t i = 0; i < options.remote_addrs.size(); ++i) {
+      const auto& segments = options.src_weight_segments[i];
+      uint64_t dst_offset = 0;
+
+      // Pull each segment from source, writing sequentially to destination
+      for (const auto& seg : segments) {
+        LOG(INFO) << "拉取权重前，dst_offset: " << dst_offset
+                  << ", seg.offset: " << seg.offset
+                  << ", seg.size: " << seg.size;
+        if (!weight_transfer_->pull_weights(options.remote_addrs[i],
+                                            seg.offset,
+                                            dst_offset,
+                                            seg.size,
+                                            options_.model_id())) {
+          LOG(ERROR) << "Failed to pull remote weight segment from "
+                     << options.remote_addrs[i] << ", src_offset=" << seg.offset
+                     << ", size=" << seg.size;
+          return false;
+        }
+        LOG(INFO) << "拉取权重后，dst_offset: " << dst_offset
+                  << ", seg.offset: " << seg.offset
+                  << ", seg.size: " << seg.size;
+        dst_offset += seg.size;
+      }
+    }
+
+    model_->reload_model_weights_from_device();
+    return true;
+#endif
+    LOG(ERROR) << "Remote weight wakeup requires USE_NPU build";
+    return false;
   }
 
-  model_->reload_model_weights_from_device();
+  if (options.master_status == LIGHT_SLEEP) {
+    model_->reload_model_weights();
+  } else if (options.master_status == DEEP_SLEEP) {
+    auto model_loader = ModelLoader::create(model_weights_path_);
+    model_->load_model(std::move(model_loader));
+  }
+
   return true;
 }
-#endif
 
 // initialize model, cache manager. async call
 bool WorkerImpl::init_model(const std::string& model_weights_path,
                             int32_t random_seed,
-                            MasterStatus master_status) {
+                            int32_t master_status) {
   // set same random seed for all worker
   FLAGS_random_seed = random_seed;
   device_.set_seed(random_seed);
@@ -987,6 +980,9 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   // create model context
   dtype_ = dtype;
   auto tensor_options = torch::dtype(dtype_).device(device_);
+
+  XTensorAllocator::get_instance().enter_init_stage();
+
   context_ = ModelContext(parallel_args_, args, quant_args, tensor_options);
   context_.set_model_id(options_.model_id());
 
@@ -1012,15 +1008,33 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
         std::make_unique<ScopedAtenLoadThreads>(/*target_threads=*/1);
   }
 
-  if (master_status == MasterStatus::WAKEUP) {
-    this->load_model(std::move(model_loader));
-  } else if (master_status == MasterStatus::LIGHT_SLEEP) {
-    this->lazy_load_model(std::move(model_loader));
-  }
-
   if (scoped_load_threads) {
     LOG(INFO) << "Weight loading completed, restored ATen threads="
               << torch::get_num_threads();
+  }
+  if (master_status == WAKEUP) {
+    this->load_model(std::move(model_loader));
+  } else if (master_status == LIGHT_SLEEP) {
+    this->lazy_load_model(std::move(model_loader));
+  }
+
+  // Register per-model offload/load callbacks with XTensorAllocator
+  // so the RPC service can execute them when master coordinates layer offload.
+  if (FLAGS_enable_watermark_degrade_restore_mvp && FLAGS_enable_xtensor) {
+    const std::string& model_id = options_.model_id();
+    int32_t num_layers =
+        static_cast<int32_t>(context_.get_model_args().n_layers());
+    XTensorAllocator::get_instance().register_layer_offload_callbacks(
+        model_id,
+        [this](int32_t layer_id) -> int64_t {
+          return std::move(offload_layer_weights_async(layer_id)).get();
+        },
+        [this](int32_t layer_id) -> int64_t {
+          return std::move(load_layer_weights_async(layer_id)).get();
+        },
+        [this]() { sync_npu_stream(); });
+    LOG(INFO) << "[WorkerImpl] Registered layer offload callbacks for model="
+              << model_id << " num_layers=" << num_layers;
   }
 
   status_ = Status::LOADED;
@@ -1080,6 +1094,46 @@ bool WorkerImpl::init_rolling_runtime_state() {
 void WorkerImpl::lazy_load_model(std::unique_ptr<ModelLoader> loader) {
   CHECK(model_ != nullptr) << "Model is not initialized.";
   model_->lazy_load_model(std::move(loader));
+}
+
+// ============================================================
+//  Layer offload / restore helpers (MVP watermark-driven)
+// ============================================================
+
+folly::SemiFuture<int64_t> WorkerImpl::offload_layer_weights_async(
+    int32_t layer_id) {
+  folly::Promise<int64_t> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([this, layer_id, p = std::move(promise)]() mutable {
+    CHECK(model_) << "Model is not initialized.";
+    int64_t pages = model_->offload_layer_weights(layer_id);
+    p.setValue(pages);
+  });
+  return future;
+}
+
+folly::SemiFuture<int64_t> WorkerImpl::load_layer_weights_async(
+    int32_t layer_id) {
+  folly::Promise<int64_t> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([this, layer_id, p = std::move(promise)]() mutable {
+    CHECK(model_) << "Model is not initialized.";
+    int64_t pages = model_->load_layer_weights(layer_id);
+    p.setValue(pages);
+  });
+  return future;
+}
+
+void WorkerImpl::sync_npu_stream() {
+  folly::Promise<folly::Unit> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([p = std::move(promise)]() mutable {
+#if defined(USE_NPU)
+    c10_npu::getCurrentNPUStream().synchronize();
+#endif
+    p.setValue(folly::unit);
+  });
+  std::move(future).get();
 }
 
 folly::SemiFuture<bool> WorkerImpl::allocate_kv_cache_async(

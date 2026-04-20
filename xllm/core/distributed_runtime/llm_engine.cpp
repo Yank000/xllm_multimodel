@@ -22,6 +22,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <atomic>
 #include <boost/algorithm/string.hpp>
 #include <chrono>
 #include <cstdint>
@@ -136,7 +137,14 @@ void LLMEngine::process_group_test() {
 #endif
 }
 
-bool LLMEngine::init(MasterStatus master_status) {
+bool LLMEngine::init(int32_t master_status) {
+  // Start watermark-driven layer offload/restore monitor thread.
+  // Start the master-side layer offload monitor via PageAllocator.
+  if (FLAGS_enable_watermark_degrade_restore_mvp && FLAGS_enable_xtensor) {
+    PageAllocator::get_instance().start_layer_offload_monitor();
+    LOG(INFO) << "LayerOffloadManager started on master via PageAllocator "
+                 "(enable_watermark_degrade_restore_mvp=true).";
+  }
   if (!init_model(master_status)) {
     LOG(ERROR) << "Failed to init model from: " << options_.model_path();
     return false;
@@ -158,13 +166,11 @@ bool LLMEngine::init(MasterStatus master_status) {
     LOG(INFO) << "Successfully initialized kv cache";
   }
 
-  // If master_status is not MasterStatus::WAKEUP, put the model to sleep after
-  // initialization
+  // If master_status is not WAKEUP, put the model to sleep after initialization
   // This allows KV cache allocation to complete first, then releases resources
-  if (FLAGS_enable_xtensor && master_status != MasterStatus::WAKEUP) {
+  if (FLAGS_enable_xtensor && master_status != WAKEUP) {
     const std::string& model_id = options_.model_id();
-    if (!PageAllocator::get_instance().sleep_model(
-            model_id, /*skip_weight_release=*/true)) {
+    if (!PageAllocator::get_instance().sleep_model(model_id)) {
       LOG(ERROR) << "Failed to sleep model " << model_id << " after init";
       return false;
     }
@@ -176,7 +182,7 @@ bool LLMEngine::init(MasterStatus master_status) {
   return true;
 }
 
-bool LLMEngine::init_model(MasterStatus master_status) {
+bool LLMEngine::init_model(int32_t master_status) {
   const std::string& model_path = options_.model_path();
   auto model_loader = ModelLoader::create(model_path);
   LOG(INFO) << "Initializing model from: " << model_path;
@@ -244,7 +250,7 @@ bool LLMEngine::init_model(MasterStatus master_status) {
           << "PhyPagePool must be initialized before PageAllocator";
       size_t num_phy_pages = phy_pool.num_total();
       // max_world_size = dp_size * tp_size = worker_clients_num_
-      int32_t max_world_size = worker_clients_num_;
+      int32_t max_world_size = static_cast<int32_t>(worker_clients_num_);
       page_allocator.init(num_phy_pages,
                           dp_size_,
                           max_world_size,
@@ -254,23 +260,62 @@ bool LLMEngine::init_model(MasterStatus master_status) {
     // Register model with model_id from options
     // Each model has its own logical page_list but shares physical pages
     const std::string& model_id = options_.model_id();
-    page_allocator.register_model(model_id, args_.n_layers(), master_status);
+
+    LOG(INFO) << "Registering model " << model_id
+              << " with priority_level=" << options_.priority_level();
+
+    // Determine initial min/max reserved pages based on priority_level
+    int32_t min_pages, max_pages;
+    int32_t priority_level = options_.priority_level();
+    switch (priority_level) {
+      case 1:  // LOW
+        min_pages = 4;
+        max_pages = 16;
+        break;
+      case 2:  // MEDIUM (default)
+        min_pages = 8;
+        max_pages = 32;
+        break;
+      case 3:  // HIGH
+        min_pages = 16;
+        max_pages = 64;
+        break;
+      case 4:  // CRITICAL
+        min_pages = 32;
+        max_pages = 128;
+        break;
+      default:
+        LOG(WARNING) << "Invalid priority_level=" << priority_level
+                     << ", using MEDIUM (2) defaults";
+        min_pages = 8;
+        max_pages = 32;
+        priority_level = 2;
+    }
+
+    // Use priority_level * 25 as priority value (1->25, 2->50, 3->75, 4->100)
+    int32_t priority = priority_level * 25;
+    if (!page_allocator.register_model(model_id,
+                                       args_.n_layers(),
+                                       master_status,
+                                       priority,
+                                       min_pages,
+                                       max_pages)) {
+      LOG(ERROR) << "Failed to register model " << model_id
+                 << " in PageAllocator (model may already be registered)";
+      return false;
+    }
 
     // Set model-specific parallel strategy for broadcast operations
     // This is important for fork master with different dp/tp than original
     // master (each model may have different dp_size/tp_size)
     page_allocator.set_model_parallel_strategy(
-        model_id, dp_size_, dp_local_tp_size_);
+        model_id, dp_size_, dp_local_tp_size_, worker_rank_base_);
     auto& xtensor_allocator = XTensorAllocator::get_instance();
     xtensor_allocator.set_model_parallel_strategy(
-        model_id, dp_size_, dp_local_tp_size_);
+        model_id, dp_size_, dp_local_tp_size_, worker_rank_base_);
 
-    // Get weight size for XTensor page allocation.
-    const int64_t total_weight_size =
-        get_effective_xtensor_weight_size(*model_loader);
-    if (total_weight_size < 0) {
-      return false;
-    }
+    // Get total weight size and compute aligned num_pages
+    int64_t total_weight_size = model_loader->get_total_weight_size();
     int64_t weight_size_per_tp =
         (total_weight_size + dp_local_tp_size_ - 1) / dp_local_tp_size_;
 
@@ -284,17 +329,15 @@ bool LLMEngine::init_model(MasterStatus master_status) {
               << ", num_pages=" << num_pages
               << ", master_status=" << master_status;
 
-    if (master_status == MasterStatus::WAKEUP) {
+    if (master_status == WAKEUP) {
       // Consume physical pages for weights (global xtensor handles mapping)
       if (!page_allocator.alloc_weight_pages(model_id, num_pages)) {
         LOG(ERROR) << "Failed to allocate weight pages";
         return false;
       }
-      LOG(INFO)
-          << "master_status=0 (MasterStatus::WAKEUP): Allocated weight pages, "
-             "will load to device";
-    } else if (master_status == MasterStatus::LIGHT_SLEEP ||
-               master_status == MasterStatus::DEEP_SLEEP) {
+      LOG(INFO) << "master_status=0 (WAKEUP): Allocated weight pages, "
+                   "will load to device";
+    } else if (master_status == LIGHT_SLEEP || master_status == DEEP_SLEEP) {
       // Record num_pages for later wakeup
       page_allocator.set_weight_pages_count(model_id, num_pages);
       LOG(INFO) << "master_status=" << master_status
@@ -1028,6 +1071,33 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
     // empty worker, return
     return {};
   }
+
+  struct ModelStepGuard {
+    ModelStepGuard(const std::string& model_id, bool enabled)
+        : model_id_(model_id), enabled_(enabled) {
+      if (enabled_) {
+        PageAllocator::get_instance().wait_and_mark_model_step_begin(model_id_);
+      }
+    }
+    ~ModelStepGuard() {
+      if (enabled_) {
+        PageAllocator::get_instance().mark_model_step_end(model_id_);
+      }
+    }
+    std::string model_id_;
+    bool enabled_ = false;
+  };
+  ModelStepGuard model_step_guard(options_.model_id(), FLAGS_enable_xtensor);
+
+  static std::atomic<uint64_t> engine_step_id{0};
+  uint64_t step_id = engine_step_id++;
+  std::string batch_sizes_str;
+  for (size_t i = 0; i < batch.size(); ++i) {
+    if (i > 0) batch_sizes_str += ",";
+    batch_sizes_str += std::to_string(batch[i].size());
+  }
+  VLOG(2) << "[ENGINE_STEP] step_id=" << step_id << " dp_size=" << batch.size()
+          << " batch_sizes=[" << batch_sizes_str << "]";
   Timer timer;
   DCHECK(dp_size_ == batch.size())
       << "Split DP batch failed with dp_size as " << dp_size_
@@ -1109,6 +1179,7 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
   }
 
   COUNTER_ADD(engine_latency_seconds, timer.elapsed_seconds());
+
   return {};
 }
 
@@ -1184,6 +1255,7 @@ void LLMEngine::setup_workers(const runtime::Options& options) {
     dist_manager_ = std::make_shared<DistManager>(options);
   }
   worker_clients_ = dist_manager_->get_worker_clients();
+  worker_rank_base_ = std::max(options.worker_rank(), 0);
 }
 
 void LLMEngine::process_eplb_data(
@@ -1261,7 +1333,7 @@ std::vector<RawForwardInput> LLMEngine::prepare_inputs(
   return batched_inputs;
 }
 
-bool LLMEngine::sleep(MasterStatus master_status) {
+bool LLMEngine::sleep(int32_t master_status) {
   // sleep/wakeup/fork_master requires FLAGS_enable_xtensor
   if (!FLAGS_enable_xtensor) {
     LOG(WARNING) << "sleep requires FLAGS_enable_xtensor to be enabled";

@@ -100,6 +100,9 @@ struct Options {
   // the node_rank of current worker process at.
   PROPERTY(int32_t, node_rank) = 0;
 
+  // worker rank base for model worker window selection.
+  PROPERTY(int32_t, worker_rank) = 0;
+
   // data parallelism size, currently mainly used for MoE model
   // default set as 1 for non-MoE model
   PROPERTY(int32_t, dp_size) = 1;
@@ -199,6 +202,10 @@ struct Options {
 
   // Layer wise H2D copy batchs
   PROPERTY(uint32_t, layers_wise_copy_batchs) = 4;
+
+  // Priority level for reserved pages allocation (1=low, 2=MEDIUM, 3=HIGH,
+  // 4=CRITICAL)
+  PROPERTY(int32_t, priority_level) = 2;
 
   // dit
   // max requests per batch

@@ -122,6 +122,9 @@ class Options {
 
   PROPERTY(int32_t, node_rank) = 0;
 
+  // worker rank base for model worker window selection
+  PROPERTY(int32_t, worker_rank) = 0;
+
   PROPERTY(int32_t, dp_size) = 1;
 
   PROPERTY(int32_t, cp_size) = 1;
@@ -244,7 +247,11 @@ class Options {
   // max concurrency for rec worker
   PROPERTY(int32_t, rec_worker_max_concurrency) = 1;
 
-  PROPERTY(MasterStatus, master_status) = MasterStatus::WAKEUP;
+  PROPERTY(int32_t, master_status) = 0;
+
+  // Priority level for reserved pages allocation (1=low, 2=MEDIUM, 3=HIGH,
+  // 4=CRITICAL)
+  PROPERTY(int32_t, priority_level) = 2;
 };
 
 }  // namespace xllm

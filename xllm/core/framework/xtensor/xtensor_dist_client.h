@@ -44,6 +44,7 @@ class XTensorDistClient {
                              const std::string& server_address,
                              const torch::Device& device);
   ~XTensorDistClient() = default;
+  int32_t global_rank() const { return global_rank_; }
 
   // Wait for server to be ready
   bool wait_for_server_ready(const std::string& server_address);
@@ -52,7 +53,12 @@ class XTensorDistClient {
   folly::SemiFuture<MemoryInfo> get_memory_info_async();
 
   // Initialize PhyPagePool on remote worker with specified number of pages
-  folly::SemiFuture<bool> init_phy_page_pool_async(int64_t num_pages);
+  // When world_size > 1: pass master_addr and my_worker_rank so worker can
+  // report consume/release to master (PageAllocator).
+  folly::SemiFuture<bool> init_phy_page_pool_async(
+      int64_t num_pages,
+      const std::string* master_addr = nullptr,
+      int32_t my_worker_rank = -1);
 
   // KV tensor operations (partial mapping by offsets)
   folly::SemiFuture<bool> map_to_kv_tensors_async(
@@ -66,6 +72,17 @@ class XTensorDistClient {
   folly::SemiFuture<bool> alloc_weight_pages_async(const std::string& model_id,
                                                    size_t num_pages);
   folly::SemiFuture<bool> free_weight_pages_async(const std::string& model_id);
+
+  folly::SemiFuture<bool> emergency_eviction_async(int32_t pages_needed,
+                                                   int32_t worker_rank);
+
+  // Layer weight offload/load (master -> worker)
+  folly::SemiFuture<int64_t> offload_layer_weights_async(
+      const std::string& model_id,
+      int32_t layer_id);
+  folly::SemiFuture<int64_t> load_layer_weights_async(
+      const std::string& model_id,
+      int32_t layer_id);
 
   // Get XTensor offsets for KV cache blocks (used in PD disaggregation)
   // Returns per-layer K/V offsets for each block

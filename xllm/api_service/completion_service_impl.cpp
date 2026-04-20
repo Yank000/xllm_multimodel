@@ -24,10 +24,12 @@ limitations under the License.
 #include <cstdint>
 #include <string>
 
+#include "common/global_flags.h"
 #include "common/instance_name.h"
 #include "completion.pb.h"
 #include "core/distributed_runtime/llm_master.h"
 #include "core/framework/request/request_output.h"
+#include "core/framework/xtensor/page_allocator.h"
 #include "core/util/utils.h"
 
 #ifdef likely
@@ -167,18 +169,12 @@ void CompletionServiceImpl::add_model_master(const std::string& model,
                                              LLMMaster* master) {
   CHECK(master != nullptr);
   std::unique_lock<std::shared_mutex> lock(llm_model_to_master_mutex_);
-  llm_model_to_master_.insert_or_assign(model, master);
-  models_.insert(model);
-}
-
-LLMMaster* CompletionServiceImpl::get_model_master(
-    const std::string& model) const {
-  std::shared_lock<std::shared_mutex> lock(llm_model_to_master_mutex_);
-  auto it = llm_model_to_master_.find(model);
-  if (it == llm_model_to_master_.end()) {
-    return nullptr;
+  auto& slot = llm_model_masters_[model];
+  if (!slot) {
+    slot = std::make_unique<LLMModelMasters>();
   }
-  return it->second;
+  slot->masters.push_back(master);
+  models_.insert(model);
 }
 
 // complete_async for brpc from xllm_service
@@ -253,10 +249,53 @@ void CompletionServiceImpl::process_async_impl(
     std::shared_ptr<CompletionCall> call) {
   const auto& rpc_request = call->request();
   const auto& model = rpc_request.model();
-  LLMMaster* master = get_model_master(model);
-  if (unlikely(master == nullptr)) {
+  auto it_mm = llm_model_masters_.find(model);
+  if (it_mm == llm_model_masters_.end() || it_mm->second->masters.empty()) {
     call->finish_with_error(StatusCode::UNKNOWN, "Model not supported");
     return;
+  }
+  auto& mm = *it_mm->second;
+  LLMMaster* master = nullptr;
+  const size_t total = mm.masters.size();
+  const size_t start = mm.rr.fetch_add(1, std::memory_order_relaxed);
+  auto& pa = PageAllocator::get_instance();
+  for (size_t i = 0; i < total; ++i) {
+    LLMMaster* candidate = mm.masters[(start + i) % total];
+    if (candidate == nullptr) {
+      continue;
+    }
+    if (FLAGS_enable_xtensor && pa.is_initialized() &&
+        pa.is_model_schedule_blocked(candidate->options().model_id())) {
+      continue;
+    }
+    master = candidate;
+    break;
+  }
+  if (unlikely(master == nullptr)) {
+    if (FLAGS_enable_xtensor && pa.is_initialized()) {
+      if (auto* mgr = pa.get_layer_offload_manager(); mgr != nullptr) {
+        auto selected_model_id =
+            mgr->trigger_load_for_base_model(model, "no_available_replica");
+        if (selected_model_id.has_value()) {
+          for (LLMMaster* candidate : mm.masters) {
+            if (candidate != nullptr &&
+                candidate->options().model_id() == selected_model_id.value()) {
+              master = candidate;
+              break;
+            }
+          }
+        }
+      }
+    }
+    if (master != nullptr) {
+      LOG(INFO) << "Route request to selected degraded replica model_id="
+                << master->options().model_id();
+    } else {
+      call->finish_with_error(
+          StatusCode::UNAVAILABLE,
+          "No available model replica (all replicas are degraded).");
+      return;
+    }
   }
 
   // Check if the request is being rate-limited or model is sleeping.
@@ -271,6 +310,10 @@ void CompletionServiceImpl::process_async_impl(
           "The number of concurrent requests has reached the limit.");
     }
     return;
+  }
+  const std::string master_model_id = master->options().model_id();
+  if (FLAGS_enable_xtensor && pa.is_initialized()) {
+    pa.mark_model_request_begin(master_model_id);
   }
 
   RequestParams request_params(
@@ -302,6 +345,7 @@ void CompletionServiceImpl::process_async_impl(
       [call,
        model,
        master = master,
+       master_model_id,
        stream = std::move(saved_streaming),
        include_usage = include_usage,
        request_id = std::move(saved_request_id),
@@ -314,6 +358,11 @@ void CompletionServiceImpl::process_async_impl(
             // Reduce the number of concurrent requests when a request is
             // finished with error.
             master->get_rate_limiter()->decrease_one_request();
+            if (FLAGS_enable_xtensor &&
+                PageAllocator::get_instance().is_initialized()) {
+              PageAllocator::get_instance().mark_model_request_end(
+                  master_model_id);
+            }
 
             return call->finish_with_error(status.code(), status.message());
           }
@@ -324,6 +373,11 @@ void CompletionServiceImpl::process_async_impl(
         if (req_output.finished || req_output.cancelled ||
             req_output.finished_on_prefill_instance) {
           master->get_rate_limiter()->decrease_one_request();
+          if (FLAGS_enable_xtensor &&
+              PageAllocator::get_instance().is_initialized()) {
+            PageAllocator::get_instance().mark_model_request_end(
+                master_model_id);
+          }
         }
 
         if (stream) {

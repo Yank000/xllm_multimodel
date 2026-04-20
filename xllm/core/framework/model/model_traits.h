@@ -125,6 +125,33 @@ struct has_pooler<T,
                       std::declval<const torch::Tensor&>()))>>
     : std::true_type {};
 
+template <typename T, typename = void>
+struct has_offload_layer_weights : std::false_type {};
+
+template <typename T>
+struct has_offload_layer_weights<
+    T,
+    std::void_t<decltype(std::declval<T>()->offload_layer_weights(0))>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_load_layer_weights : std::false_type {};
+
+template <typename T>
+struct has_load_layer_weights<
+    T,
+    std::void_t<decltype(std::declval<T>()->load_layer_weights(0))>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_free_atb_buffer : std::false_type {};
+
+template <typename T>
+struct has_free_atb_buffer<
+    T,
+    std::void_t<decltype(std::declval<T>()->free_atb_buffer())>>
+    : std::true_type {};
+
 #if defined(USE_NPU)
 template <typename T, typename = void>
 struct has_get_npu_lm_head : std::false_type {};

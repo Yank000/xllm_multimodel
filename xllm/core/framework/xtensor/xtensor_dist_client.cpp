@@ -89,23 +89,36 @@ folly::SemiFuture<MemoryInfo> XTensorDistClient::get_memory_info_async() {
 }
 
 folly::SemiFuture<bool> XTensorDistClient::init_phy_page_pool_async(
-    int64_t num_pages) {
+    int64_t num_pages,
+    const std::string* master_addr,
+    int32_t my_worker_rank) {
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();
-  threadpool_.schedule(
-      [this, num_pages, promise = std::move(promise)]() mutable {
-        proto::InitPhyPagePoolRequest req;
-        req.set_num_pages(num_pages);
-        proto::Status resp;
-        brpc::Controller cntl;
-        stub_->InitPhyPagePool(&cntl, &req, &resp, nullptr);
-        if (cntl.Failed()) {
-          LOG(ERROR) << "InitPhyPagePool failed: " << cntl.ErrorText();
-          promise.setValue(false);
-          return;
-        }
-        promise.setValue(resp.ok());
-      });
+  std::string master_addr_copy;
+  if (master_addr) {
+    master_addr_copy = *master_addr;
+  }
+  threadpool_.schedule([this,
+                        num_pages,
+                        master_addr_copy,
+                        my_worker_rank,
+                        promise = std::move(promise)]() mutable {
+    proto::InitPhyPagePoolRequest req;
+    req.set_num_pages(num_pages);
+    if (!master_addr_copy.empty() && my_worker_rank >= 0) {
+      req.set_master_xtensor_dist_addr(master_addr_copy);
+      req.set_my_worker_rank(my_worker_rank);
+    }
+    proto::Status resp;
+    brpc::Controller cntl;
+    stub_->InitPhyPagePool(&cntl, &req, &resp, nullptr);
+    if (cntl.Failed()) {
+      LOG(ERROR) << "InitPhyPagePool failed: " << cntl.ErrorText();
+      promise.setValue(false);
+      return;
+    }
+    promise.setValue(resp.ok());
+  });
   return future;
 }
 
@@ -203,6 +216,79 @@ folly::SemiFuture<bool> XTensorDistClient::free_weight_pages_async(
           return;
         }
         promise.setValue(resp.ok());
+      });
+  return future;
+}
+
+folly::SemiFuture<bool> XTensorDistClient::emergency_eviction_async(
+    int32_t pages_needed,
+    int32_t worker_rank) {
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([this,
+                        pages_needed,
+                        worker_rank,
+                        promise = std::move(promise)]() mutable {
+    proto::EmergencyEvictionRequest req;
+    req.set_pages_needed(pages_needed);
+    req.set_worker_rank(worker_rank);
+    proto::Status resp;
+    brpc::Controller cntl;
+    stub_->EmergencyEviction(&cntl, &req, &resp, nullptr);
+    if (cntl.Failed()) {
+      LOG(ERROR) << "EmergencyEviction failed: " << cntl.ErrorText();
+      promise.setValue(false);
+      return;
+    }
+    promise.setValue(resp.ok());
+  });
+  return future;
+}
+
+folly::SemiFuture<int64_t> XTensorDistClient::offload_layer_weights_async(
+    const std::string& model_id,
+    int32_t layer_id) {
+  folly::Promise<int64_t> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule(
+      [this, model_id, layer_id, promise = std::move(promise)]() mutable {
+        proto::OffloadLayerWeightsRequest req;
+        req.set_model_id(model_id);
+        req.set_layer_id(layer_id);
+        proto::LayerWeightOpResponse resp;
+        brpc::Controller cntl;
+        stub_->OffloadLayerWeights(&cntl, &req, &resp, nullptr);
+        if (cntl.Failed() || !resp.success()) {
+          LOG(ERROR) << "OffloadLayerWeights failed for model=" << model_id
+                     << " layer=" << layer_id << ": " << cntl.ErrorText();
+          promise.setValue(-1);
+          return;
+        }
+        promise.setValue(resp.pages_changed());
+      });
+  return future;
+}
+
+folly::SemiFuture<int64_t> XTensorDistClient::load_layer_weights_async(
+    const std::string& model_id,
+    int32_t layer_id) {
+  folly::Promise<int64_t> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule(
+      [this, model_id, layer_id, promise = std::move(promise)]() mutable {
+        proto::LoadLayerWeightsRequest req;
+        req.set_model_id(model_id);
+        req.set_layer_id(layer_id);
+        proto::LayerWeightOpResponse resp;
+        brpc::Controller cntl;
+        stub_->LoadLayerWeights(&cntl, &req, &resp, nullptr);
+        if (cntl.Failed() || !resp.success()) {
+          LOG(ERROR) << "LoadLayerWeights failed for model=" << model_id
+                     << " layer=" << layer_id << ": " << cntl.ErrorText();
+          promise.setValue(-1);
+          return;
+        }
+        promise.setValue(resp.pages_changed());
       });
   return future;
 }

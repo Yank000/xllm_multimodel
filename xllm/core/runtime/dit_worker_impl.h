@@ -42,12 +42,12 @@ class DiTWorkerImpl : public WorkerImpl {
   // initialize model, cache manager. blocking call
   bool init_model(const std::string& model_weights_path,
                   int32_t random_seed,
-                  MasterStatus master_status) override;
+                  int32_t master_status) override;
 
   folly::SemiFuture<bool> init_model_async(
       const std::string& model_weights_path,
       int32_t random_seed,
-      MasterStatus master_status) override;
+      int32_t master_status) override;
 
   bool init_model(ModelContext& context) override;
 

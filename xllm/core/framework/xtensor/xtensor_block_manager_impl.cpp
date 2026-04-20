@@ -19,8 +19,11 @@ limitations under the License.
 
 #include <algorithm>
 #include <chrono>
+#include <unordered_map>
 
 #include "common/global_flags.h"
+#include "framework/prefix_cache/global_prefix_cache_manager.h"
+#include "framework/prefix_cache/prefix_cache.h"
 #include "page_allocator.h"
 #include "phy_page_pool.h"
 #include "xtensor_allocator.h"
@@ -46,6 +49,20 @@ XTensorBlockManagerImpl::XTensorBlockManagerImpl(const Options& options,
             << ", block_size=" << options.block_size()
             << ", block_mem_size=" << block_mem_size_
             << ", num_blocks=" << options.num_blocks();
+
+  // Initialize prefix cache if enabled
+  if (FLAGS_enable_prefix_cache && FLAGS_enable_xtensor) {
+    prefix_cache_ = std::make_unique<PrefixCache>(options.block_size(),
+                                                  model_id_,
+                                                  true  // enable_global_lru
+    );
+    GlobalPrefixCacheManager::instance().register_cache(model_id_,
+                                                        prefix_cache_.get());
+    LOG(INFO) << "Enabled global prefix cache for model: " << model_id_;
+  }
+
+  PageAllocator::get_instance().register_prefix_block_manager(
+      model_id_, dp_rank_, this);
 }
 
 void XTensorBlockManagerImpl::reserve_xtensor_padding_blocks() {
@@ -59,6 +76,14 @@ void XTensorBlockManagerImpl::reserve_xtensor_padding_blocks() {
 }
 
 XTensorBlockManagerImpl::~XTensorBlockManagerImpl() {
+  PageAllocator::get_instance().unregister_prefix_block_manager(
+      model_id_, dp_rank_, this);
+
+  // Unregister from global manager if using global prefix cache
+  if (FLAGS_enable_prefix_cache && FLAGS_enable_xtensor && !model_id_.empty()) {
+    GlobalPrefixCacheManager::instance().unregister_cache(model_id_);
+  }
+
   // Release all pages
   std::lock_guard<std::mutex> lock(mtx_);
   std::vector<int64_t> page_ids;
@@ -78,12 +103,13 @@ XTensorBlockManagerImpl::~XTensorBlockManagerImpl() {
 }
 
 std::vector<int32_t> XTensorBlockManagerImpl::alloc_internal(size_t need_size) {
-  std::lock_guard<std::mutex> lock(mtx_);
+  std::unique_lock<std::mutex> lock(mtx_);
 
+  // LOG(INFO) << "[KVCache]: allocate " << need_size << " block";
   size_t avail = available_size_internal();
   if (avail < need_size) {
-    LOG(WARNING) << "available_size()=" << avail
-                 << " < need_size=" << need_size;
+    LOG(WARNING) << "[XTensorBlockManager] available_size()=" << avail
+                 << " < need_size=" << need_size << " model_id=" << model_id_;
   }
 
   std::vector<int32_t> ret_index;
@@ -108,9 +134,17 @@ std::vector<int32_t> XTensorBlockManagerImpl::alloc_internal(size_t need_size) {
     VirtPage* page = nullptr;
 
     if (avail_pages_.empty()) {
-      // Allocate a new page for this DP group
-      auto new_page = PageAllocator::get_instance().alloc_kv_cache_page(
-          model_id_, dp_rank_);
+      // Release block manager lock before calling PageAllocator to avoid
+      // deadlock: alloc_kv_cache_page() may block on cond_.wait() for
+      // physical pages; emergency eviction runs in another thread and
+      // needs this lock when freeing blocks back to this manager.
+      lock.unlock();
+      std::unique_ptr<VirtPage> new_page =
+          PageAllocator::get_instance().alloc_kv_cache_page(model_id_,
+                                                            dp_rank_);
+      // LOG(INFO) << "[KVCache]: allocate 1 page";
+      lock.lock();
+
       if (new_page == nullptr) {
         LOG(ERROR) << "Failed to allocate new page for dp_rank=" << dp_rank_;
         // Return what we have allocated so far (caller should handle partial
@@ -169,6 +203,7 @@ Block XTensorBlockManagerImpl::allocate() {
 void XTensorBlockManagerImpl::free_blocks(const std::vector<int32_t>& indices) {
   std::lock_guard<std::mutex> lock(mtx_);
 
+  // LOG(INFO) << "[KVCache]: free " << indices.size() << " block";
   if (indices.empty()) {
     return;
   }
@@ -230,6 +265,7 @@ void XTensorBlockManagerImpl::free_blocks(const std::vector<int32_t>& indices) {
 
   if (!pages_to_free.empty()) {
     page_allocator.free_kv_cache_pages(model_id_, dp_rank_, pages_to_free);
+    // LOG(INFO) << "[KVCache]: free 1 page";
   }
 }
 
@@ -245,23 +281,28 @@ void XTensorBlockManagerImpl::free(int32_t block_id) {
 std::vector<Block> XTensorBlockManagerImpl::allocate_shared(
     const Slice<int32_t>& tokens_ids,
     const Slice<Block>& existed_shared_blocks) {
-  // Prefix cache not supported
-  VLOG(1) << "allocate_shared called but prefix cache is not supported";
-  return {};
+  if (!prefix_cache_) {
+    return {};
+  }
+  return prefix_cache_->match(tokens_ids, existed_shared_blocks);
 }
 
 void XTensorBlockManagerImpl::cache(const Slice<int32_t>& token_ids,
                                     std::vector<Block>& blocks,
                                     size_t existed_shared_blocks_num) {
-  // Prefix cache not supported
-  VLOG(1) << "cache called but prefix cache is not supported";
-  return;
+  if (!prefix_cache_) {
+    return;
+  }
+  AUTO_COUNTER(prefix_cache_latency_seconds_insert);
+  prefix_cache_->insert(token_ids, blocks, existed_shared_blocks_num);
 }
 
 void XTensorBlockManagerImpl::cache(const std::vector<Block>& blocks) {
-  // Prefix cache not supported
-  VLOG(1) << "cache called but prefix cache is not supported";
-  return;
+  if (!prefix_cache_) {
+    return;
+  }
+  AUTO_COUNTER(prefix_cache_latency_seconds_insert);
+  prefix_cache_->insert(blocks);
 }
 
 void XTensorBlockManagerImpl::get_merged_kvcache_event(
@@ -279,6 +320,67 @@ size_t XTensorBlockManagerImpl::num_free_blocks() const {
 size_t XTensorBlockManagerImpl::num_used_blocks() const {
   std::lock_guard<std::mutex> lock(mtx_);
   return get_num_allocated_blocks();
+}
+
+size_t XTensorBlockManagerImpl::num_blocks_in_prefix_cache() const {
+  if (prefix_cache_) {
+    return prefix_cache_->num_blocks();
+  }
+  return 0;
+}
+
+size_t XTensorBlockManagerImpl::num_prefix_only_reclaimable_virt_pages() const {
+  if (!prefix_cache_) {
+    return 0;
+  }
+
+  auto cached_stats = prefix_cache_->get_cached_block_stats();
+  if (cached_stats.empty()) {
+    return 0;
+  }
+
+  std::unordered_map<int64_t, size_t> prefix_only_blocks_by_page;
+  prefix_only_blocks_by_page.reserve(cached_stats.size());
+  for (const auto& stat : cached_stats) {
+    // ref_count == 1 means this block is held only by prefix cache.
+    if (stat.block_id < 0 || stat.ref_count != 1) {
+      continue;
+    }
+    int64_t page_id =
+        static_cast<int64_t>(stat.block_id) * block_mem_size_ / page_size_;
+    ++prefix_only_blocks_by_page[page_id];
+  }
+
+  if (prefix_only_blocks_by_page.empty()) {
+    return 0;
+  }
+
+  const size_t blocks_per_page =
+      VirtPage::get_num_blocks(page_size_, block_mem_size_);
+  if (blocks_per_page == 0) {
+    return 0;
+  }
+
+  size_t reclaimable_virt_pages = 0;
+  {
+    std::lock_guard<std::mutex> lock(mtx_);
+    auto count_reclaimable = [&](const auto& pages) {
+      for (const auto& [page_id, page_ptr] : pages) {
+        auto it = prefix_only_blocks_by_page.find(page_id);
+        if (it == prefix_only_blocks_by_page.end()) {
+          continue;
+        }
+        const size_t prefix_only_blocks = it->second;
+        const size_t free_blocks = page_ptr->num_free_blocks();
+        if (free_blocks + prefix_only_blocks >= blocks_per_page) {
+          ++reclaimable_virt_pages;
+        }
+      }
+    };
+    count_reclaimable(avail_pages_);
+    count_reclaimable(full_pages_);
+  }
+  return reclaimable_virt_pages;
 }
 
 double XTensorBlockManagerImpl::kv_cache_utilization() const {

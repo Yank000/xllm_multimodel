@@ -44,6 +44,12 @@ limitations under the License.
 #include "function_call/function_call_parser.h"
 #include "parser/reasoning_parser.h"
 #include "server/xllm_server_registry.h"
+
+#if defined(USE_NPU)
+#include "torch_memory.h"
+#include "torch_npu/csrc/npu/NPUPluggableAllocator.h"
+#endif
+
 using namespace xllm;
 
 static std::atomic<uint32_t> signal_received{0};
@@ -275,13 +281,23 @@ int run() {
       .beam_width(FLAGS_beam_width)
       .kv_cache_dtype(FLAGS_kv_cache_dtype)
       .rec_worker_max_concurrency(FLAGS_rec_worker_max_concurrency)
-      .is_local(is_local);
+      .is_local(is_local)
+      .priority_level(FLAGS_priority_level);
 
   InstanceName::name()->set_name(options.instance_name().value_or(""));
 
   // master node
   // init XTensor allocator and PhyPagePool for xtensor mode
   if (FLAGS_enable_xtensor) {
+    if (FLAGS_enable_activation_pooling) {
+      std::shared_ptr<c10_npu::NPUCachingAllocator::NPUAllocator>
+          torch_allocator =
+              torch::npu::NPUPluggableAllocator::createCustomAllocator(
+                  my_custom_alloc, my_custom_free);
+
+      torch::npu::NPUPluggableAllocator::changeCurrentAllocator(
+          torch_allocator);
+    }
     // Parse devices
     const auto devices =
         DeviceNameUtils::parse_devices(options.devices().value_or("auto"));

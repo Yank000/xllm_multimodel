@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <string>
+
 #include "kv_cache_transfer.h"
 #include "mooncake_transfer_engine.h"
 

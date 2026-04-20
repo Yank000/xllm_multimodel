@@ -21,6 +21,7 @@ limitations under the License.
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -45,13 +46,23 @@ void xxh3_128bits_hash(const uint8_t* pre_hash_value,
 
 class PrefixCache {
  public:
+  struct CachedBlockStat {
+    int32_t block_id = -1;
+    uint32_t ref_count = 0;
+  };
+
   PrefixCache(const PrefixCache&) = delete;
   PrefixCache(PrefixCache&&) = delete;
   PrefixCache& operator=(const PrefixCache&) = delete;
   PrefixCache& operator=(PrefixCache&&) = delete;
 
-  explicit PrefixCache(uint32_t block_size)
-      : block_size_(block_size), num_blocks_(0) {}
+  explicit PrefixCache(uint32_t block_size,
+                       const std::string& model_id = "",
+                       bool enable_global_lru = false)
+      : block_size_(block_size),
+        num_blocks_(0),
+        model_id_(model_id),
+        enable_global_lru_(enable_global_lru) {}
 
   virtual ~PrefixCache() {
     exited_.store(true);
@@ -82,11 +93,11 @@ class PrefixCache {
   virtual size_t evict(size_t n_blocks);
 
   // get the number of blocks in the prefix cache
-  virtual size_t num_blocks() const {
-    CHECK(num_blocks_ == cached_blocks_.size()) << "check block num failed";
+  virtual size_t num_blocks() const;
 
-    return num_blocks_;
-  }
+  // Snapshot cached block ids and their current ref_count.
+  // Used by memory accounting paths (e.g. prefix-only reclaimable pages).
+  virtual std::vector<CachedBlockStat> get_cached_block_stats() const;
 
   float block_match_rate() {
     if (total_blocks_.load() == 0) {
@@ -97,6 +108,9 @@ class PrefixCache {
   }
 
   virtual KvCacheEvent* get_upload_kvcache_events() { return nullptr; }
+
+  // Hook for global eviction path
+  virtual void on_global_evicted(const std::vector<XXH3Key>& evict_keys) {}
 
   static uint32_t compute_hash_keys(const Slice<int32_t>& token_ids,
                                     std::vector<Block>& blocks,
@@ -120,6 +134,9 @@ class PrefixCache {
     // the previous and next nodes, used to maintain the LRU list
     Node* prev = nullptr;
     Node* next = nullptr;
+
+    // model ID (used for global LRU mode)
+    std::string model_id;
   };
 
   struct DNodeList {
@@ -197,6 +214,11 @@ class PrefixCache {
 
   DNodeList lru_lst_;
 
+  // Protects cached_blocks_, num_blocks_, and lru_lst_. Global eviction must
+  // not touch the hash table while holding GlobalPrefixCacheManager::mutex_ to
+  // avoid deadlock with insert() (which locks this then the global LRU mutex).
+  mutable std::mutex cache_mutex_;
+
   // the block size of the memory blocks
   uint32_t block_size_;
 
@@ -209,6 +231,20 @@ class PrefixCache {
       cached_blocks_;
 
   std::atomic<uint64_t> total_blocks_{0}, matched_blocks_{0};
+
+  // Model ID (for global LRU mode)
+  std::string model_id_;
+
+  // Whether to use global LRU (enabled when FLAGS_enable_xtensor &&
+  // FLAGS_enable_prefix_cache)
+  bool enable_global_lru_;
+
+  // Friend class for global LRU access
+  friend class GlobalPrefixCacheManager;
+
+ public:
+  // Helper method for global eviction to remove node from hash table
+  void remove_from_hash_table(const XXH3Key& key);
 };
 
 }  // namespace xllm

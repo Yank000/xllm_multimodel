@@ -252,6 +252,10 @@ DECLARE_bool(enable_rolling_load);
 DECLARE_int32(rolling_load_num_cached_layers);
 DECLARE_int32(rolling_load_num_rolling_slots);
 
+DECLARE_bool(enable_activation_pooling);
+
+DECLARE_int32(global_xtensor_map_rate);
+
 // --- beam search config ---
 DECLARE_bool(enable_beam_search_kernel);
 
@@ -323,6 +327,17 @@ DECLARE_int32(beam_width);
 DECLARE_bool(enable_xattention_one_stage);
 
 DECLARE_bool(use_audio_in_video);
+DECLARE_bool(enable_dynamic_reserved_pages);
+
+DECLARE_int32(priority_level);
+
+DECLARE_int32(priority_window_size);
+
+DECLARE_int32(priority_ttft_slo_ms);
+
+DECLARE_int32(priority_tpot_slo_ms);
+
+DECLARE_int32(load_model_slo_violation_rate);
 
 // --- concurrent rec worker config ---
 DECLARE_uint32(rec_worker_max_concurrency);
@@ -334,3 +349,13 @@ DECLARE_bool(enable_intralayer_addnorm);
 #endif
 
 DECLARE_int32(health_check_interval_ms);
+
+// --- watermark-based layer weight offload/restore MVP ---
+DECLARE_bool(enable_watermark_degrade_restore_mvp);
+DECLARE_double(layer_offload_low_watermark_ratio);
+DECLARE_double(layer_offload_high_watermark_ratio);
+DECLARE_double(layer_offload_restore_watermark_ratio);
+DECLARE_int32(offload_chunk_layers);
+DECLARE_int32(load_chunk_layers);
+DECLARE_int32(layer_offload_drain_timeout_ms);
+DECLARE_int32(layer_offload_poll_interval_ms);
