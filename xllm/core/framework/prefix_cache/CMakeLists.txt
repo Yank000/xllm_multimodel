@@ -18,7 +18,6 @@ cc_library(
   DEPS
     $<$<BOOL:${USE_NPU}>:torch_npu>
     $<$<BOOL:${USE_NPU}>:graph>
-    :request
     :common
     glog::glog
     Boost::serialization

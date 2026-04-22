@@ -79,12 +79,17 @@ class GlobalXTensor {
   size_t page_size() const { return page_size_; }
   size_t allocate_offset() const { return allocate_offset_; }
   size_t free_offset() const { return free_offset_; }
+
+  // Jinjun: modify
   void* activation_allocate_ptr() const {
-    return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_) +
+    // return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_) +
+    //                                allocate_offset_);
+    return reinterpret_cast<void*>(static_cast<uintptr_t>(vaddr_) +
                                    allocate_offset_);
   }
   void* init_activation_allocate_ptr() const {
-    return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_));
+    // return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_));
+    return reinterpret_cast<void*>(static_cast<uintptr_t>(vaddr_));
   }
   void* allocate_init_from_left(size_t count);
 

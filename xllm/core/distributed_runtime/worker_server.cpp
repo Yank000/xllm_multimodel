@@ -113,7 +113,16 @@ void WorkerServer::create_server(
   //    std::make_unique<WorkerServiceImpl>(worker_impl);
   auto worker_service = std::make_shared<WorkerService>(options, device);
 
-  auto addr = net::get_local_ip_addr();
+  std::string addr;
+  if (options.device_ip().has_value() && !options.device_ip().value().empty()) {
+    addr = options.device_ip().value();
+  } else {
+    addr = net::get_local_ip_addr();
+  }
+  if (addr.empty()) {
+    addr = "127.0.0.1";
+    LOG(WARNING) << "Worker server bind address is empty; fallback to " << addr;
+  }
   auto worker_server =
       ServerRegistry::get_instance().register_server(server_name_);
   if (!worker_server->start(worker_service, addr + ":0")) {

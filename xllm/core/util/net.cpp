@@ -33,29 +33,65 @@ static std::unordered_set<int> g_allocated_port_map;
 
 // TODO: return private ip
 std::string get_local_ip_addr() {
-  char ip[INET_ADDRSTRLEN]{'\0'};
-  char hostname[256];
-  int ret = gethostname(hostname, sizeof(hostname));
-  if (ret != 0) {
-    LOG(ERROR) << "gethostname failed";
-    return "";
-  }
-  struct addrinfo* info = nullptr;
-  struct addrinfo hints;
-  memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_INET;
-  hints.ai_socktype = SOCK_STREAM;
-  ret = getaddrinfo(hostname, nullptr, &hints, &info);
-  if (ret != 0) {
-    LOG(ERROR) << "getaddrinfo failed";
-    return "";
-  }
-  auto guard = std::unique_ptr<struct addrinfo, decltype(&freeaddrinfo)>(
-      info, freeaddrinfo);
-  auto* addr = (struct sockaddr_in*)info->ai_addr;
-  auto* result = inet_ntop(addr->sin_family, &addr->sin_addr, ip, sizeof(ip));
+  auto resolve_ipv4 = [](const char* host, char ip[INET_ADDRSTRLEN]) -> bool {
+    if (host == nullptr || host[0] == '\0') {
+      return false;
+    }
+    struct addrinfo* info = nullptr;
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    int ret = getaddrinfo(host, nullptr, &hints, &info);
+    if (ret != 0) {
+      return false;
+    }
 
-  return std::string(ip);
+    auto guard = std::unique_ptr<struct addrinfo, decltype(&freeaddrinfo)>(
+        info, freeaddrinfo);
+    for (auto* cur = info; cur != nullptr; cur = cur->ai_next) {
+      if (cur->ai_family != AF_INET || cur->ai_addr == nullptr) {
+        continue;
+      }
+      auto* addr = reinterpret_cast<struct sockaddr_in*>(cur->ai_addr);
+      if (inet_ntop(addr->sin_family, &addr->sin_addr, ip, INET_ADDRSTRLEN) !=
+          nullptr) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  char ip[INET_ADDRSTRLEN]{'\0'};
+  char hostname[256]{'\0'};
+  if (gethostname(hostname, sizeof(hostname)) != 0) {
+    LOG(ERROR) << "gethostname failed";
+    return "127.0.0.1";
+  }
+
+  if (resolve_ipv4(hostname, ip)) {
+    return std::string(ip);
+  }
+
+  LOG(ERROR) << "getaddrinfo failed for hostname: " << hostname;
+
+  std::string host(hostname);
+  auto dot_pos = host.find('.');
+  if (dot_pos != std::string::npos) {
+    std::string short_host = host.substr(0, dot_pos);
+    if (resolve_ipv4(short_host.c_str(), ip)) {
+      LOG(WARNING) << "resolved short hostname as fallback: " << short_host;
+      return std::string(ip);
+    }
+  }
+
+  if (resolve_ipv4("localhost", ip)) {
+    LOG(WARNING) << "resolved localhost as fallback";
+    return std::string(ip);
+  }
+
+  LOG(WARNING) << "failed to resolve local IP, fallback to 127.0.0.1";
+  return "127.0.0.1";
 }
 
 int get_local_free_port() {

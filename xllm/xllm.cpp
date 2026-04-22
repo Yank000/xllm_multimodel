@@ -45,9 +45,14 @@ limitations under the License.
 #include "parser/reasoning_parser.h"
 #include "server/xllm_server_registry.h"
 
-#if defined(USE_NPU)
+#if defined(USE_NPU) || defined(USE_CUDA)
 #include "torch_memory.h"
+#endif
+#if defined(USE_NPU)
 #include "torch_npu/csrc/npu/NPUPluggableAllocator.h"
+#endif
+#if defined(USE_CUDA)
+#include "torch/csrc/cuda/CUDAPluggableAllocator.h"
 #endif
 
 using namespace xllm;
@@ -82,7 +87,8 @@ void validate_flags(const std::string& model_type) {
   }
 #endif
 
-#if defined(USE_NPU)
+// Jinjun: modify, add USE_CUDA
+#if defined(USE_NPU) || defined(USE_CUDA)
   // enable_xtensor / enable_rolling_load imply enable_manual_loader
   if ((FLAGS_enable_xtensor || FLAGS_enable_rolling_load) &&
       !FLAGS_enable_manual_loader) {
@@ -289,6 +295,7 @@ int run() {
   // master node
   // init XTensor allocator and PhyPagePool for xtensor mode
   if (FLAGS_enable_xtensor) {
+#if defined(USE_NPU)
     if (FLAGS_enable_activation_pooling) {
       std::shared_ptr<c10_npu::NPUCachingAllocator::NPUAllocator>
           torch_allocator =
@@ -298,6 +305,17 @@ int run() {
       torch::npu::NPUPluggableAllocator::changeCurrentAllocator(
           torch_allocator);
     }
+#elif defined(USE_CUDA)
+    if (FLAGS_enable_activation_pooling) {
+      std::shared_ptr<c10::cuda::CUDACachingAllocator::CUDAAllocator>
+          torch_allocator =
+              torch::cuda::CUDAPluggableAllocator::createCustomAllocator(
+                  my_custom_alloc, my_custom_free);
+
+      torch::cuda::CUDAPluggableAllocator::changeCurrentAllocator(
+          torch_allocator);
+    }
+#endif
     // Parse devices
     const auto devices =
         DeviceNameUtils::parse_devices(options.devices().value_or("auto"));

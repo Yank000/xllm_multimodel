@@ -23,10 +23,13 @@ cc_binary(
 )
 
 add_dependencies(export_module spawn_worker)
-
 target_link_libraries(spawn_worker PRIVATE
-  "-Wl,--start-group"
-  $<TARGET_FILE:xtensor>
-  $<TARGET_FILE:prefix_cache>
-  "-Wl,--end-group"
+  xtensor
+  request
+  prefix_cache
+  block
+)
+target_link_options(spawn_worker PRIVATE
+  "-Wl,-u,_ZN4xllm23RequestMetricAggregator8instanceEv"
+  "-Wl,-u,_ZNK4xllm24GlobalPrefixCacheManager23get_total_cached_blocksEv"
 )

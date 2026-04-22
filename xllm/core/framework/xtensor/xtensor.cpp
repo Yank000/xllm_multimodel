@@ -134,8 +134,8 @@ bool XTensor::map_external_page(offset_t offset,
     return false;
   }
 
-  VirPtr vaddr =
-      reinterpret_cast<VirPtr>(reinterpret_cast<uintptr_t>(vaddr_) + offset);
+  // Jinjun:modify
+  VirPtr vaddr = static_cast<VirPtr>(static_cast<uintptr_t>(vaddr_) + offset);
   PhyMemHandle phy_handle = page->get_phy_handle();
   vmm::map(vaddr, phy_handle);
   mapping_[page_id] = std::move(page);
@@ -179,8 +179,8 @@ std::unique_ptr<PhyPage> XTensor::unmap_and_take(offset_t offset) {
     return nullptr;
   }
 
-  VirPtr vaddr =
-      reinterpret_cast<VirPtr>(reinterpret_cast<uintptr_t>(vaddr_) + offset);
+  // Jinjun:modify
+  VirPtr vaddr = static_cast<VirPtr>(static_cast<uintptr_t>(vaddr_) + offset);
   vmm::unmap(vaddr, page_size_);
 
   auto page = std::move(it->second);
@@ -283,10 +283,16 @@ torch::Tensor XTensor::to_torch_tensor(size_t offset,
   uintptr_t addr = vir_ptr_to_uintptr(vaddr_) + offset;
   auto dtype = dtype_;
 
+#if defined(USE_NPU) || defined(USE_CUDA)
 #if defined(USE_NPU)
   c10::DeviceType device_type = c10::DeviceType::PrivateUse1;
   torch::TensorOptions option =
       torch::TensorOptions().dtype(dtype).device(device_type);
+#elif defined(USE_CUDA)
+  c10::DeviceType device_type = c10::DeviceType::CUDA;
+  torch::TensorOptions option =
+      torch::TensorOptions().dtype(dtype).device(dev_);
+#endif
 
   auto tensor = torch::empty({0}, option);
   auto address = reinterpret_cast<void*>(addr);
@@ -295,22 +301,33 @@ torch::Tensor XTensor::to_torch_tensor(size_t offset,
   size_t tensor_nbytes = at::detail::computeStorageNbytesContiguous(
       dims, tensor.dtype().itemsize());
   torch::Storage storage;
+#if defined(USE_NPU)
   // get npu storage constructor from register and construct storage
   auto fptr = c10::GetStorageImplCreate(device_type);
+  CHECK(fptr != nullptr) << "StorageImplCreate function is null for device "
+                         << static_cast<int>(device_type);
   auto allocator = c10::GetAllocator(device_type);
-
   // PyTorch 2.7+: StorageImpl now takes DataPtr instead of raw allocator
   storage = fptr(c10::StorageImpl::use_byte_size_t(),
                  c10::SymInt(tensor_nbytes),
                  std::move(c10_data_ptr),
                  allocator,
                  true);
+#elif defined(USE_CUDA)
+  // CUDA path: avoid GetStorageImplCreate(CUDA) (can be null in some builds).
+  // Wrap external VMM memory as non-resizable storage without allocator.
+  storage = c10::Storage(c10::Storage::use_byte_size_t(),
+                         tensor_nbytes,
+                         std::move(c10_data_ptr),
+                         nullptr,
+                         false);
+#endif
 
   tensor.set_(storage, 0, dims);
 
   return tensor;
 #else
-  // For non-NPU devices, use torch::from_blob
+  // For non-NPU/non-CUDA devices, use torch::from_blob
   auto options =
       torch::TensorOptions().dtype(dtype).device(dev_).requires_grad(false);
   return torch::from_blob(reinterpret_cast<void*>(addr), dims, options);

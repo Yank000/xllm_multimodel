@@ -50,7 +50,7 @@ void GlobalXTensor::init(const torch::Device& device) {
   total_size_ *= 128;
   segment_size_ = total_size_;  // 128GB per reserved segment
 
-  VirPtr global_vir_ptr = nullptr;
+  VirPtr global_vir_ptr = static_cast<VirPtr>(0);
   // 42 x 128GB at most, leave 1 x 128GB to kvcache virtual memory
   std::vector<VirPtr> global_vir_ptrs;
   int32_t reserve_times = 2;
@@ -100,7 +100,7 @@ void GlobalXTensor::init(const torch::Device& device) {
 
 void* GlobalXTensor::allocate_init_from_left(size_t count) {
   CHECK_GT(count, 0);
-  const uintptr_t base = reinterpret_cast<uintptr_t>(vaddr_);
+  const uintptr_t base = static_cast<uintptr_t>(vaddr_);
 
   void* result = reinterpret_cast<void*>(base + init_allocate_offset_);
 
@@ -156,7 +156,7 @@ bool GlobalXTensor::map_all_pages(const std::vector<PhyPage*>& pages) {
 }
 
 bool GlobalXTensor::move_one_page(uintptr_t src_addr, size_t dst_offset) {
-  const uintptr_t base = reinterpret_cast<uintptr_t>(vaddr_);
+  const uintptr_t base = static_cast<uintptr_t>(vaddr_);
   const size_t src_offset = src_addr - base;
 
   if (src_offset % page_size_ != 0) {
@@ -172,7 +172,8 @@ bool GlobalXTensor::move_one_page(uintptr_t src_addr, size_t dst_offset) {
     page = it->second;
   }
 
-  void* src_vaddr = reinterpret_cast<VirPtr>(src_addr);
+  void* src_vaddr = reinterpret_cast<void*>(static_cast<uintptr_t>(src_addr));
+  ;
   {
     std::lock_guard<std::mutex> lock(unmap_queue_mtx_);
     unmap_queue_.push(src_vaddr);
@@ -199,7 +200,7 @@ void GlobalXTensor::free_to_right_async(std::vector<PhyPage*> page_ptrs) {
       if (free_offset_ >= total_size_) {
         migration_src_next_.store(total_size_ - page_size_);
         migration_in_flight_.store(true);
-        const uintptr_t base = reinterpret_cast<uintptr_t>(vaddr_);
+        const uintptr_t base = static_cast<uintptr_t>(vaddr_);
         LOG(INFO) << "free_to_right_async: map at boundary, starting migration";
 
         free_offset_ = infer_arena_start_;
@@ -267,7 +268,7 @@ void* GlobalXTensor::allocate_from_left(size_t count) {
     if (allocate_offset_.compare_exchange_weak(old_offset, new_offset)) {
       if (crosses) {
         // Collect physical pages stranded in [old_offset, seg_end).
-        const uintptr_t base = reinterpret_cast<uintptr_t>(vaddr_);
+        const uintptr_t base = static_cast<uintptr_t>(vaddr_);
         std::vector<PhyPage*> tail_pages;
         {
           std::shared_lock<std::shared_mutex> lock(page_map_mtx_);
@@ -297,7 +298,7 @@ void* GlobalXTensor::allocate_from_left(size_t count) {
   }
 
   void* result =
-      reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_) + allocated);
+      reinterpret_cast<void*>(static_cast<uintptr_t>(vaddr_) + allocated);
 
   size_t ma = emergency_eviction_count_;
   // 当物理页不够时，先等待已有 free_to_right_async 完成；若仍不够则从 pool
@@ -320,7 +321,7 @@ std::vector<page_id_t> GlobalXTensor::allocate_pages_from_left(size_t count) {
   wait_enough_pages(allocated + page_size_ * count, count);
   for (size_t i = 0; i < count; i++) {
     void* ptr_to_unmap = reinterpret_cast<void*>(
-        reinterpret_cast<uintptr_t>(vaddr_) + allocated + i * page_size_);
+        static_cast<uintptr_t>(vaddr_) + allocated + i * page_size_);
     PhyPage* page = nullptr;
     {
       std::shared_lock<std::shared_mutex> lock(page_map_mtx_);
@@ -339,7 +340,7 @@ std::vector<page_id_t> GlobalXTensor::allocate_pages_from_left(size_t count) {
 }
 
 void GlobalXTensor::free_one_page_async(size_t addr) {
-  size_t offset = addr - reinterpret_cast<uintptr_t>(vaddr_);
+  size_t offset = addr - static_cast<uintptr_t>(vaddr_);
   void* ptr = reinterpret_cast<void*>(addr);
   PhyPage* page;
   {
@@ -409,9 +410,10 @@ void GlobalXTensor::unmap_worker() {
         void* ptr = unmap_queue_.front();
         unmap_queue_.pop();
         lock.unlock();
-        vmm::unmap(ptr, page_size_);
+        VirPtr vir_ptr = static_cast<VirPtr>(reinterpret_cast<uintptr_t>(ptr));
+        vmm::unmap(vir_ptr, page_size_);
         size_t offset =
-            reinterpret_cast<size_t>(ptr) - reinterpret_cast<size_t>(vaddr_);
+            reinterpret_cast<size_t>(ptr) - static_cast<size_t>(vaddr_);
         {
           std::unique_lock<std::shared_mutex> lock(page_map_mtx_);
           page_map_.erase(offset);

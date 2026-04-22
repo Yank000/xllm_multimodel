@@ -73,7 +73,7 @@ else()
       xllm
     SRCS
       xllm.cpp
-      NPUPluggableAllocator.cpp
+      $<$<BOOL:${USE_NPU}>:NPUPluggableAllocator.cpp>
     DEPS
       :flags
       :xllm_server
@@ -91,6 +91,16 @@ endif()
 # link brpc
 target_link_libraries(xllm PRIVATE glog::glog brpc leveldb::leveldb protobuf::libprotobuf ${OpenCV_LIBS})
 add_dependencies(xllm brpc-static)
+target_link_libraries(xllm PRIVATE
+  xtensor
+  request
+  prefix_cache
+  block
+)
+target_link_options(xllm PRIVATE
+  "-Wl,-u,_ZN4xllm23RequestMetricAggregator8instanceEv"
+  "-Wl,-u,_ZNK4xllm24GlobalPrefixCacheManager23get_total_cached_blocksEv"
+)
 
 if(USE_NPU)
   set(COMMON_LIBS torch_npu torch_python Python::Python ascendcl atb_customize hccl c_sec nnopbase ms_tools_ext)

@@ -1198,8 +1198,9 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
     }
     tensors.weight_num_pages = num_pages;
     tensors.weight_xtensor_offset = weight_xtensor_next_free_offset_;
+    // Jinjun:modify
     tensors.weight_base_ptr = reinterpret_cast<void*>(
-        reinterpret_cast<uintptr_t>(weight_xtensor_->vaddr()) +
+        static_cast<uintptr_t>(weight_xtensor_->vaddr()) +
         tensors.weight_xtensor_offset);
     tensors.weight_current_offset = 0;
     weight_xtensor_next_free_offset_ += bytes;
@@ -1252,7 +1253,7 @@ bool XTensorAllocator::alloc_weight_pages_local(const std::string& model_id,
   // Populate weight_segments for D2D transfer support
   tensors.weight_segments.clear();
   tensors.weight_segments.push_back(
-      {vir_ptr_to_uintptr(tensors.weight_base_ptr),
+      {vir_ptr_to_uintptr(reinterpret_cast<uintptr_t>(tensors.weight_base_ptr)),
        static_cast<uint64_t>(num_pages) * page_size_});
   LOG(INFO) << "XTensorAllocator: populated weight_segments for model "
             << model_id << ", num_pages=" << num_pages

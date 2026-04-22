@@ -170,7 +170,9 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     if (FLAGS_enable_eplb) {
       return output;
     }
+#if defined(USE_NPU)
     model_->free_atb_buffer();
+#endif
     return std::nullopt;
   }
 
@@ -242,7 +244,9 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   DeviceMonitor::get_instance().update_active_activation_memory(
       device_.index());
 
+#if defined(USE_NPU)
   model_->free_atb_buffer();
+#endif
 
   return output;
 }
