@@ -322,6 +322,10 @@ class XTensorAllocator {
   std::unordered_map<std::string, std::vector<WeightSegment>>
   get_all_model_weight_segments() const;
 
+  inline auto find_ptr(void*& ptr) {
+    return activation_allocated_ptrs_.find(ptr);
+  }
+
  private:
   XTensorAllocator() = default;
   ~XTensorAllocator();

@@ -58,3 +58,6 @@ compile_commands.json
 /local
 /logs
 /log
+
+/benchmark
+/diff.md

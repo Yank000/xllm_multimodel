@@ -304,6 +304,7 @@ int run() {
 
       torch::npu::NPUPluggableAllocator::changeCurrentAllocator(
           torch_allocator);
+      LOG(INFO) << "[activation_allocator] switched to custom NPU allocator.";
     }
 #elif defined(USE_CUDA)
     if (FLAGS_enable_activation_pooling) {
@@ -314,6 +315,7 @@ int run() {
 
       torch::cuda::CUDAPluggableAllocator::changeCurrentAllocator(
           torch_allocator);
+      LOG(INFO) << "[activation_allocator] switched to custom CUDA allocator.";
     }
 #endif
     // Parse devices

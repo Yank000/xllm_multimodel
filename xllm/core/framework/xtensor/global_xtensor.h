@@ -72,7 +72,7 @@ class GlobalXTensor {
   }
 
   // Get base virtual address
-  void* base_vaddr() const { return vir_ptr_to_void_ptr(vaddr_); }
+  void* base_vaddr() const;
 
   size_t total_size() const { return total_size_; }
   size_t num_total_pages() const { return num_total_pages_; }
@@ -81,16 +81,8 @@ class GlobalXTensor {
   size_t free_offset() const { return free_offset_; }
 
   // Jinjun: modify
-  void* activation_allocate_ptr() const {
-    // return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_) +
-    //                                allocate_offset_);
-    return reinterpret_cast<void*>(static_cast<uintptr_t>(vaddr_) +
-                                   allocate_offset_);
-  }
-  void* init_activation_allocate_ptr() const {
-    // return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(vaddr_));
-    return reinterpret_cast<void*>(static_cast<uintptr_t>(vaddr_));
-  }
+  void* activation_allocate_ptr() const;
+  void* init_activation_allocate_ptr() const;
   void* allocate_init_from_left(size_t count);
 
   // Mooncake registration status (for idempotent registration)
@@ -115,14 +107,15 @@ class GlobalXTensor {
   std::thread unmap_thread_;
   bool unmap_running_ = false;
   std::atomic<bool> unmap_working_{false};
-  std::queue<void*> unmap_queue_;
+  std::queue<size_t> unmap_queue_;
 
   void map_page(PhyPage* page, size_t offset);
   bool map_all_pages(const std::vector<PhyPage*>& pages);
+  VirPtr offset_to_vir_ptr(size_t offset) const;
+  void* offset_to_void_ptr(size_t offset) const;
+  size_t addr_to_offset(size_t addr) const;
 
-  // Move a single page from src_addr to free_offset_ if mapped at src. Returns
-  // true if a page was moved. Used for incremental migration (end-to-begin).
-  bool move_one_page(uintptr_t src_addr, size_t dst_offset);
+  bool move_one_page(size_t src_offset, size_t dst_offset);
 
   void unmap_worker();
 
@@ -137,6 +130,7 @@ class GlobalXTensor {
   bool initialized_ = false;
 
   VirPtr vaddr_ = {};
+  std::vector<VirPtr> segment_vaddrs_;
   size_t segment_size_ = 0;  // size of each 128GB virtual segment
   size_t total_size_ = 0;
   size_t page_size_ = 0;
