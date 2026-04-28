@@ -49,6 +49,8 @@ class RMSNormImpl : public torch::nn::Module {
 
   torch::Tensor weight() const { return weight_; }
   torch::Tensor bias() const { return bias_; }
+  torch::Tensor& mutable_weight_tensor() { return weight_; }
+  torch::Tensor& mutable_bias_tensor() { return bias_; }
   double eps() const { return eps_; }
 
  private:

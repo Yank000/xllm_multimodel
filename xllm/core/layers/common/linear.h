@@ -91,6 +91,9 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
 
   bool is_weight_loaded() const { return weight_is_loaded_; }
 
+  torch::Tensor& mutable_weight_tensor() { return weight_; }
+  torch::Tensor& mutable_bias_tensor() { return bias_; }
+
   // Get FP8 input scale for fused RMSNorm+FP8 quantization
   std::optional<torch::Tensor> get_input_scale() const;
 
@@ -150,6 +153,9 @@ class QKVParallelLinearImpl : public torch::nn::Module {
 
   // return the weight (for testing)
   torch::Tensor weight() const { return weight_; }
+
+  torch::Tensor& mutable_weight_tensor() { return weight_; }
+  torch::Tensor& mutable_bias_tensor() { return bias_; }
 
   // Get FP8 input scale for fused RMSNorm+FP8 quantization
   // For QKV, returns max of Q/K/V scales (per-tensor)
@@ -233,6 +239,9 @@ class RowParallelLinearImpl : public torch::nn::Module {
     return std::nullopt;
   }
   ProcessGroup* process_group() const { return process_group_; }
+
+  torch::Tensor& mutable_weight_tensor() { return weight_; }
+  torch::Tensor& mutable_bias_tensor() { return bias_; }
 
  private:
   // parameter members, must be registered

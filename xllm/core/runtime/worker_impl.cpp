@@ -28,6 +28,7 @@ limitations under the License.
 #include <framework/core/caching_allocator.h>
 #elif defined(USE_CUDA) || defined(USE_ILU)
 #include <c10/cuda/CUDACachingAllocator.h>
+#include <c10/cuda/CUDAStream.h>
 #endif
 
 #include <algorithm>
@@ -1020,7 +1021,9 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 
   // Register per-model offload/load callbacks with XTensorAllocator
   // so the RPC service can execute them when master coordinates layer offload.
-  if (FLAGS_enable_watermark_degrade_restore_mvp && FLAGS_enable_xtensor) {
+  if (FLAGS_enable_xtensor &&
+      (FLAGS_enable_watermark_degrade_restore_mvp ||
+       FLAGS_enable_layer_weight_offload_load_self_test)) {
     const std::string& model_id = options_.model_id();
     int32_t num_layers =
         static_cast<int32_t>(context_.get_model_args().n_layers());
@@ -1032,7 +1035,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
         [this](int32_t layer_id) -> int64_t {
           return std::move(load_layer_weights_async(layer_id)).get();
         },
-        [this]() { sync_npu_stream(); });
+        [this]() { sync_device_stream(); });
     LOG(INFO) << "[WorkerImpl] Registered layer offload callbacks for model="
               << model_id << " num_layers=" << num_layers;
   }
@@ -1124,12 +1127,14 @@ folly::SemiFuture<int64_t> WorkerImpl::load_layer_weights_async(
   return future;
 }
 
-void WorkerImpl::sync_npu_stream() {
+void WorkerImpl::sync_device_stream() {
   folly::Promise<folly::Unit> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([p = std::move(promise)]() mutable {
 #if defined(USE_NPU)
     c10_npu::getCurrentNPUStream().synchronize();
+#elif defined(USE_CUDA)
+    c10::cuda::getCurrentCUDAStream().synchronize();
 #endif
     p.setValue(folly::unit);
   });

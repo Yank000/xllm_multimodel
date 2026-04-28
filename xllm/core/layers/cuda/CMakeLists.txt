@@ -13,6 +13,8 @@ cc_library(
     flashinfer_workspace.h
     xattention_workspace.h
     flashinfer_planinfo.h
+    loader/base_cuda_manual_loader.h
+    loader/cuda_weight_tensor_ref.h
   SRCS
     attention.cpp
     base_attention_impl.cpp
@@ -22,8 +24,12 @@ cc_library(
     flashinfer_workspace.cpp
     xattention_workspace.cpp
     flashinfer_planinfo.cpp
+    loader/base_cuda_manual_loader.cpp
   DEPS
     :common_layers
+    :xtensor
+    gflags::gflags
+    glog::glog
 )
 
 cc_test(

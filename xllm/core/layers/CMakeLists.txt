@@ -43,15 +43,18 @@ cc_library(
     qwen3_vision_layer.h
     qwen3_decoder_layer.h
     qwen3_moe_decoder_layer.h
+    $<$<BOOL:${USE_CUDA}>:cuda/loader/qwen_cuda_decoder_manual_loader.h>
   SRCS
     qwen2_vision_layer.cpp
     qwen2_decoder_layer.cpp
     qwen2_5_vision_layer.cpp
     qwen3_vision_layer.cpp
     qwen3_moe_decoder_layer.cpp
+    $<$<BOOL:${USE_CUDA}>:cuda/loader/qwen_cuda_decoder_manual_loader.cpp>
   DEPS
     $<$<BOOL:${USE_NPU}>:npu_layers>
     $<$<BOOL:${USE_ILU}>:ilu_layers>
+    $<$<BOOL:${USE_CUDA}>:cuda_layers>
     :common_layers
     :parallel_state
     :state_dict

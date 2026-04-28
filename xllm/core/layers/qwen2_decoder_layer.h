@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <memory>
 #include <optional>
 #include <tuple>
 
@@ -29,6 +30,9 @@ limitations under the License.
 #include "framework/model_context.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/state_dict/state_dict.h"
+#if defined(USE_CUDA)
+#include "cuda/loader/qwen_cuda_decoder_manual_loader.h"
+#endif
 
 namespace xllm {
 namespace layer {
@@ -47,11 +51,26 @@ class Qwen2DecoderLayerImpl : public torch::nn::Module {
                         KVCache& kv_cache,
                         const ModelInputParams& input_params);
 
+#if defined(USE_CUDA)
+  int64_t offload_weights();
+  int64_t load_weights_from_pinned();
+  bool are_weight_pages_on_device() const;
+
+  Qwen2Attention& attention_for_cuda_loader() { return attention_; }
+  DenseMLP& mlp_for_cuda_loader() { return mlp_; }
+  RMSNorm& input_norm_for_cuda_loader() { return input_norm_; }
+  RMSNorm& post_norm_for_cuda_loader() { return post_norm_; }
+#endif
+
  private:
   Qwen2Attention attention_{nullptr};
   DenseMLP mlp_{nullptr};
   RMSNorm input_norm_{nullptr};
   RMSNorm post_norm_{nullptr};
+
+#if defined(USE_CUDA)
+  std::unique_ptr<QwenCudaDecoderManualLoader> cuda_loader_;
+#endif
 
   ParallelArgs parallel_args_;
 

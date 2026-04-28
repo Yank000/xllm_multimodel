@@ -186,11 +186,13 @@ class WorkerImpl {
   Status get_status() const { return status_; }
 
   // ---- Layer offload / restore (MVP watermark-driven) ----
-  // Dispatches to WorkerImpl's own threadpool so NPU stream context is correct.
+  // Dispatches to WorkerImpl's own threadpool so device stream context is
+  // correct.
   folly::SemiFuture<int64_t> offload_layer_weights_async(int32_t layer_id);
   folly::SemiFuture<int64_t> load_layer_weights_async(int32_t layer_id);
-  // Synchronize NPU stream on the Worker's own thread (blocking from caller).
-  void sync_npu_stream();
+  // Synchronize device stream on the Worker's own thread (blocking from
+  // caller).
+  void sync_device_stream();
 
   // model context, includes model args, parallel args and date type etc.
   mutable ModelContext context_;

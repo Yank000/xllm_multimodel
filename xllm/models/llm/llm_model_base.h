@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,7 @@ limitations under the License.
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model/model_output.h"
+#include "core/framework/model/model_traits.h"
 #include "core/framework/model_context.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/layers/common/lm_head.h"
@@ -145,6 +147,41 @@ class LlmModelImplBase : public torch::nn::Module {
     embed_tokens_ = word_embedding;
   }
 
+#if defined(USE_CUDA)
+  virtual int64_t offload_layer_weights(int32_t layer_id) {
+    if (layer_id < 0 || static_cast<size_t>(layer_id) >= layers_.size()) {
+      LOG(ERROR) << "Invalid layer_id for offload: " << layer_id;
+      return -1;
+    }
+    if constexpr (detail::has_offload_weights<DecoderLayerType>::value) {
+      return layers_[layer_id]->offload_weights();
+    }
+    return 0;
+  }
+
+  virtual int64_t load_layer_weights(int32_t layer_id) {
+    if (layer_id < 0 || static_cast<size_t>(layer_id) >= layers_.size()) {
+      LOG(ERROR) << "Invalid layer_id for load: " << layer_id;
+      return -1;
+    }
+    if constexpr (detail::has_load_weights_from_pinned<
+                      DecoderLayerType>::value) {
+      return layers_[layer_id]->load_weights_from_pinned();
+    }
+    return 0;
+  }
+
+  virtual bool are_weight_pages_on_device() const {
+    if constexpr (detail::has_are_weight_pages_on_device<
+                      DecoderLayerType>::value) {
+      return std::all_of(layers_.begin(), layers_.end(), [](const auto& layer) {
+        return layer->are_weight_pages_on_device();
+      });
+    }
+    return true;
+  }
+#endif
+
  protected:
   torch::Tensor cos_sin_;
   int32_t max_seq_len_ = 0;
@@ -247,6 +284,16 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
   virtual void set_word_embedding(layer::WordEmbedding& word_embedding) {
     model_->set_word_embedding(word_embedding);
   }
+
+#if defined(USE_CUDA)
+  virtual int64_t offload_layer_weights(int32_t layer_id) {
+    return model_->offload_layer_weights(layer_id);
+  }
+
+  virtual int64_t load_layer_weights(int32_t layer_id) {
+    return model_->load_layer_weights(layer_id);
+  }
+#endif
 
  protected:
   // parameter members, must be registered

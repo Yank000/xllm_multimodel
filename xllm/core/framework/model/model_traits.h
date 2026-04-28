@@ -144,6 +144,33 @@ struct has_load_layer_weights<
     : std::true_type {};
 
 template <typename T, typename = void>
+struct has_offload_weights : std::false_type {};
+
+template <typename T>
+struct has_offload_weights<
+    T,
+    std::void_t<decltype(std::declval<T>()->offload_weights())>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_load_weights_from_pinned : std::false_type {};
+
+template <typename T>
+struct has_load_weights_from_pinned<
+    T,
+    std::void_t<decltype(std::declval<T>()->load_weights_from_pinned())>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_are_weight_pages_on_device : std::false_type {};
+
+template <typename T>
+struct has_are_weight_pages_on_device<
+    T,
+    std::void_t<decltype(std::declval<T>()->are_weight_pages_on_device())>>
+    : std::true_type {};
+
+template <typename T, typename = void>
 struct has_free_atb_buffer : std::false_type {};
 
 template <typename T>

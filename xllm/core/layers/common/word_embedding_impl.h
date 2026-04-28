@@ -51,6 +51,7 @@ class WordEmbeddingImpl : public torch::nn::Module {
 
   // return the weight (for testing)
   torch::Tensor weight() const { return weight_; }
+  torch::Tensor& mutable_weight_tensor() { return weight_; }
 
  private:
   // rank of current process

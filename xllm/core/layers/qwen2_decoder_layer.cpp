@@ -15,6 +15,12 @@ limitations under the License.
 
 #include "qwen2_decoder_layer.h"
 
+#include "core/common/global_flags.h"
+
+#if defined(USE_CUDA)
+#include "cuda/loader/qwen_cuda_decoder_manual_loader.h"
+#endif
+
 namespace xllm {
 namespace layer {
 
@@ -51,6 +57,12 @@ Qwen2DecoderLayerImpl::Qwen2DecoderLayerImpl(const ModelContext& context,
                                   parallel_args_.tp_group_,
                                   options,
                                   mlp_module_prefix));
+#if defined(USE_CUDA)
+  if (FLAGS_enable_manual_loader) {
+    cuda_loader_ = std::make_unique<QwenCudaDecoderManualLoader>(context);
+    cuda_loader_->bind(*this);
+  }
+#endif
 }
 
 void Qwen2DecoderLayerImpl::load_state_dict(const StateDict& state_dict) {
@@ -60,7 +72,28 @@ void Qwen2DecoderLayerImpl::load_state_dict(const StateDict& state_dict) {
   post_norm_->load_state_dict(
       state_dict.get_dict_with_prefix("post_attention_layernorm."));
   mlp_->load_state_dict(state_dict.get_dict_with_prefix("mlp."));
+#if defined(USE_CUDA)
+  if (cuda_loader_) {
+    cuda_loader_->initialize_from_bound_tensors();
+  }
+#endif
 }
+
+#if defined(USE_CUDA)
+int64_t Qwen2DecoderLayerImpl::offload_weights() {
+  return cuda_loader_ ? cuda_loader_->release_weight_pages_for_this_layer() : 0;
+}
+
+int64_t Qwen2DecoderLayerImpl::load_weights_from_pinned() {
+  return cuda_loader_
+             ? cuda_loader_->ensure_weight_pages_mapped_then_copy_from_host()
+             : 0;
+}
+
+bool Qwen2DecoderLayerImpl::are_weight_pages_on_device() const {
+  return cuda_loader_ ? cuda_loader_->are_weight_pages_on_device() : true;
+}
+#endif
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>>
 Qwen2DecoderLayerImpl::apply_norm(
@@ -91,6 +124,9 @@ torch::Tensor Qwen2DecoderLayerImpl::forward(
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
     const ModelInputParams& input_params) {
+#if defined(USE_CUDA)
+  CHECK(are_weight_pages_on_device()) << "Decoder layer weights are offloaded";
+#endif
   auto pre_fp8_scale = attention_->get_fp8_input_scale();
   auto post_fp8_scale = mlp_->get_fp8_input_scale();
 

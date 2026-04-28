@@ -45,6 +45,14 @@ class Qwen2AttentionImpl : public torch::nn::Module {
   // Get FP8 input scale from qkv_proj for fused RMSNorm+FP8 quantization
   std::optional<torch::Tensor> get_fp8_input_scale() const;
 
+#if defined(USE_CUDA)
+  QKVParallelLinear& qkv_proj_for_cuda_loader() { return qkv_proj_; }
+  RowParallelLinear& o_proj_for_cuda_loader() { return o_proj_; }
+  RMSNorm& q_norm_for_cuda_loader() { return q_norm_; }
+  RMSNorm& k_norm_for_cuda_loader() { return k_norm_; }
+  bool is_qwen3_style_for_cuda_loader() const { return is_qwen3_style_; }
+#endif
+
  private:
   int64_t num_heads_;
   int64_t num_kv_heads_;

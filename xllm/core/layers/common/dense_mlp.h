@@ -51,6 +51,11 @@ class DenseMLPImpl : public torch::nn::Module {
   // Get FP8 input scale from gate_up_proj for fused RMSNorm+FP8 quantization
   std::optional<torch::Tensor> get_fp8_input_scale() const;
 
+#if defined(USE_CUDA)
+  ColumnParallelLinear& gate_up_proj_for_cuda_loader() { return gate_up_proj_; }
+  RowParallelLinear& down_proj_for_cuda_loader() { return down_proj_; }
+#endif
+
  private:
   bool is_gated_;
   int64_t intermediate_size_;
