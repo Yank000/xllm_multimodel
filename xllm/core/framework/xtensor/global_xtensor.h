@@ -117,6 +117,8 @@ class GlobalXTensor {
 
   bool move_one_page(size_t src_offset, size_t dst_offset);
 
+  size_t pending_unmap_count();
+  size_t drain_unmap_queue(size_t max_count);
   void unmap_worker();
 
   mutable std::mutex mtx_;

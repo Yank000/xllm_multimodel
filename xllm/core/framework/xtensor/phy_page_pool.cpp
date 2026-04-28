@@ -383,10 +383,10 @@ void* PhyPagePool::allocate_contiguous(size_t count,
   } else {
     result = global_xtensor.allocate_from_left(count);
   }
-  int32_t worker_rank =
-      report_my_worker_rank_ >= 0 ? report_my_worker_rank_ : device_.index();
   if (is_activation) {
     if (page_allocator.is_initialized()) {
+      int32_t worker_rank =
+          report_my_worker_rank_ >= 0 ? report_my_worker_rank_ : 0;
       page_allocator.consume_phy_pages_for_worker(worker_rank, count);
     } else {
       report_consume_via_shared_counter(count);
@@ -407,9 +407,9 @@ void PhyPagePool::free_contiguous(size_t addr, size_t count) {
     global_xtensor.free_one_page_async(addr);
     addr += 2 * 1024 * 1024;
   }
-  int32_t worker_rank =
-      report_my_worker_rank_ >= 0 ? report_my_worker_rank_ : device_.index();
   if (page_allocator.is_initialized()) {
+    int32_t worker_rank =
+        report_my_worker_rank_ >= 0 ? report_my_worker_rank_ : 0;
     page_allocator.release_phy_pages_for_worker(worker_rank, count);
   } else {
     report_release_via_shared_counter(count);

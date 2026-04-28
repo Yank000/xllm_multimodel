@@ -27,7 +27,10 @@ namespace xllm {
 
 namespace {
 constexpr size_t kInitArenaSizeBytes = 128ULL * 1024ULL * 1024ULL * 1024ULL;
-}
+constexpr size_t kMaxPendingUnmapsBeforeDrain = 4096;
+constexpr size_t kUnmapDrainBatchSize = 1024;
+constexpr size_t kMigrationMoveBatchSize = 1024;
+}  // namespace
 
 void* GlobalXTensor::base_vaddr() const { return offset_to_void_ptr(0); }
 
@@ -86,7 +89,7 @@ void GlobalXTensor::init(const torch::Device& device) {
   VirPtr global_vir_ptr = static_cast<VirPtr>(0);
   int32_t reserve_times = 2;
   if (FLAGS_enable_activation_pooling) {
-    reserve_times = 38;
+    reserve_times = 1000;
   }
   segment_vaddrs_.clear();
   segment_vaddrs_.reserve(reserve_times);
@@ -220,6 +223,9 @@ void GlobalXTensor::free_to_right_async(std::vector<PhyPage*> page_ptrs) {
       PhyPage* page_to_map = page_ptrs[i];
       map_page(page_to_map, free_offset_);
       free_offset_ += page_size_;
+      if (pending_unmap_count() >= kMaxPendingUnmapsBeforeDrain) {
+        drain_unmap_queue(kUnmapDrainBatchSize);
+      }
       // free_offset_ increased by page_size_ in map_page; at page granularity
       // start migration when map at boundary.
       if (free_offset_ >= total_size_) {
@@ -231,10 +237,17 @@ void GlobalXTensor::free_to_right_async(std::vector<PhyPage*> page_ptrs) {
 
         size_t migration_src_next = migration_src_next_.load();
         migration_src_end_.store(allocate_offset_.load());
+        size_t moved_since_drain = 0;
         while (migration_src_next > migration_src_end_.load()) {
           migration_src_next = migration_src_next_.fetch_sub(page_size_);
           move_one_page(migration_src_next, free_offset_);
           free_offset_ += page_size_;
+          ++moved_since_drain;
+          if (moved_since_drain >= kMigrationMoveBatchSize ||
+              pending_unmap_count() >= kMaxPendingUnmapsBeforeDrain) {
+            drain_unmap_queue(kUnmapDrainBatchSize);
+            moved_since_drain = 0;
+          }
           if (!allocate_offset_migrated_) {
             migration_src_end_.store(allocate_offset_.load());
           }
@@ -421,21 +434,48 @@ void GlobalXTensor::wait_enough_pages(size_t allocated, size_t count) {
   map_miss_time += (end - start).count();
 }
 
+size_t GlobalXTensor::pending_unmap_count() {
+  std::lock_guard<std::mutex> lock(unmap_queue_mtx_);
+  return unmap_queue_.size();
+}
+
+size_t GlobalXTensor::drain_unmap_queue(size_t max_count) {
+  size_t drained = 0;
+  while (drained < max_count) {
+    size_t offset = 0;
+    {
+      std::lock_guard<std::mutex> lock(unmap_queue_mtx_);
+      if (unmap_queue_.empty()) {
+        break;
+      }
+      offset = unmap_queue_.front();
+      unmap_queue_.pop();
+    }
+    {
+      std::shared_lock<std::shared_mutex> lock(page_map_mtx_);
+      if (page_map_.find(offset) == page_map_.end()) {
+        continue;
+      }
+    }
+    VirPtr vir_ptr = offset_to_vir_ptr(offset);
+    vmm::unmap(vir_ptr, page_size_);
+    {
+      std::unique_lock<std::shared_mutex> lock(page_map_mtx_);
+      page_map_.erase(offset);
+    }
+    ++drained;
+  }
+  return drained;
+}
+
 void GlobalXTensor::unmap_worker() {
   while (unmap_running_) {
-    while (unmap_working_.load()) {
-      std::unique_lock<std::mutex> lock(unmap_queue_mtx_);
-      if (!unmap_queue_.empty()) {
-        size_t offset = unmap_queue_.front();
-        unmap_queue_.pop();
-        lock.unlock();
-        VirPtr vir_ptr = offset_to_vir_ptr(offset);
-        vmm::unmap(vir_ptr, page_size_);
-        {
-          std::unique_lock<std::shared_mutex> lock(page_map_mtx_);
-          page_map_.erase(offset);
-        }
-      }
+    if (!unmap_working_.load()) {
+      std::this_thread::yield();
+      continue;
+    }
+    if (drain_unmap_queue(kUnmapDrainBatchSize) == 0) {
+      std::this_thread::yield();
     }
   }
 }
