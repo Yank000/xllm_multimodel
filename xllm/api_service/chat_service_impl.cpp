@@ -696,7 +696,7 @@ void ChatServiceImpl::process_async_impl(std::shared_ptr<ChatCall> call) {
              master,
              stream,
              include_usage,
-             first_message_sent = std::move(first_message_sent),
+             first_message_sent,
              request_id,
              created_time,
              json_tools,
