@@ -21,14 +21,17 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 
 #include "common/instance_name.h"
 #include "completion.pb.h"
+#include "core/common/global_flags.h"
 #include "core/framework/request/request_output.h"
 #include "core/runtime/llm_master.h"
 #include "core/util/utils.h"
+#include "prism_dispatcher.h"
 
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
@@ -198,44 +201,76 @@ void CompletionServiceImpl::process_async_impl(
 
   auto saved_streaming = request_params.streaming;
   auto saved_request_id = request_params.request_id;
-  // schedule the request
-  master_->handle_request(
-      std::move(rpc_request.prompt()),
-      std::move(prompt_tokens),
-      std::move(request_params),
-      call.get(),
+  const int32_t request_slo_ms = request_params.slo_ms;
+  auto prompt = std::string(rpc_request.prompt());
+  const size_t prompt_len = prompt_tokens.has_value()
+                                ? prompt_tokens->size()
+                                : static_cast<size_t>(prompt.size());
+  auto prism_marked = std::make_shared<std::atomic_bool>(false);
+  auto submit_request =
       [call,
        model,
        master = master_,
        stream = std::move(saved_streaming),
        include_usage = include_usage,
        request_id = std::move(saved_request_id),
-       created_time = absl::ToUnixSeconds(absl::Now())](
-          const RequestOutput& req_output) -> bool {
-        if (req_output.status.has_value()) {
-          const auto& status = req_output.status.value();
-          if (!status.ok()) {
-            // Reduce the number of concurrent requests when a request is
-            // finished with error.
-            master->get_rate_limiter()->decrease_one_request();
+       created_time = absl::ToUnixSeconds(absl::Now()),
+       prompt = std::move(prompt),
+       prompt_tokens = std::move(prompt_tokens),
+       request_params = std::move(request_params),
+       prism_marked]() mutable {
+        master->handle_request(
+            std::move(prompt),
+            std::move(prompt_tokens),
+            std::move(request_params),
+            call.get(),
+            [call,
+             model,
+             master,
+             stream,
+             include_usage,
+             request_id,
+             created_time,
+             prism_marked](const RequestOutput& req_output) -> bool {
+              if (req_output.status.has_value()) {
+                const auto& status = req_output.status.value();
+                if (!status.ok()) {
+                  // Reduce the number of concurrent requests when a request is
+                  // finished with error.
+                  master->get_rate_limiter()->decrease_one_request();
+                  if (FLAGS_enable_prism && !prism_marked->exchange(true)) {
+                    PrismDispatcher::instance().mark_request_finished(model);
+                  }
 
-            return call->finish_with_error(status.code(), status.message());
-          }
-        }
+                  return call->finish_with_error(status.code(), status.message());
+                }
+              }
 
-        // Reduce the number of concurrent requests when a request is finished
-        // or canceled.
-        if (req_output.finished || req_output.cancelled) {
-          master->get_rate_limiter()->decrease_one_request();
-        }
+              // Reduce the number of concurrent requests when a request is
+              // finished or canceled.
+              if (req_output.finished || req_output.cancelled) {
+                master->get_rate_limiter()->decrease_one_request();
+                if (FLAGS_enable_prism && !prism_marked->exchange(true)) {
+                  PrismDispatcher::instance().mark_request_finished(model);
+                }
+              }
 
-        if (stream) {
-          return send_delta_to_client_brpc(
-              call, include_usage, request_id, created_time, model, req_output);
-        }
-        return send_result_to_client_brpc(
-            call, request_id, created_time, model, req_output);
-      });
+              if (stream) {
+                return send_delta_to_client_brpc(
+                    call, include_usage, request_id, created_time, model, req_output);
+              }
+              return send_result_to_client_brpc(
+                  call, request_id, created_time, model, req_output);
+            });
+      };
+
+  // Switch point: PRISM uses a global queue + SLO priority + per-model gate.
+  if (FLAGS_enable_prism) {
+    PrismDispatcher::instance().enqueue_request(
+        model, request_slo_ms, prompt_len, std::move(submit_request));
+  } else {
+    submit_request();
+  }
 }
 
 }  // namespace xllm

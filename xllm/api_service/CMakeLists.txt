@@ -1,4 +1,5 @@
 include(cc_library)
+include(cc_test)
 
 cc_library(
   NAME 
@@ -20,6 +21,7 @@ cc_library(
     models_service_impl.h
     stream_output_parser.h
     mm_service_utils.h
+    prism_dispatcher.h
   SRCS
     api_service.cpp
     call.cpp
@@ -32,6 +34,7 @@ cc_library(
     rerank_service_impl.cpp
     stream_output_parser.cpp
     qwen3_rerank_service_impl.cpp
+    prism_dispatcher.cpp
   DEPS
     :master
     :chat_template
@@ -46,3 +49,12 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:torch_npu>
 )
 
+cc_test(
+  NAME
+    prism_dispatcher_test
+  SRCS
+    prism_dispatcher_test.cpp
+  DEPS
+    api_service
+    GTest::gtest_main
+)

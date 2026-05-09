@@ -315,6 +315,10 @@ DEFINE_bool(enable_service_routing,
             false,
             "Whether to use xllm service routing.");
 
+DEFINE_bool(enable_prism,
+            false,
+            "Whether to enable PRISM-style admission in API service.");
+
 DEFINE_double(heart_beat_interval, 0.5, "Heart beat interval.");
 
 DEFINE_int32(etcd_ttl, 3, "Time to live for etcd.");

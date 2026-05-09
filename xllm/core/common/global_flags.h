@@ -141,6 +141,8 @@ DECLARE_string(etcd_addr);
 
 DECLARE_bool(enable_service_routing);
 
+DECLARE_bool(enable_prism);
+
 DECLARE_double(heart_beat_interval);
 
 DECLARE_int32(etcd_ttl);

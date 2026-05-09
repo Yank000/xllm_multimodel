@@ -24,11 +24,13 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <boost/algorithm/string.hpp>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <unordered_set>
 
 #include "api_service/stream_output_parser.h"
+#include "core/common/global_flags.h"
 #include "core/common/instance_name.h"
 #include "core/common/types.h"
 #include "core/framework/request/request_params.h"
@@ -37,6 +39,7 @@ limitations under the License.
 #include "core/util/utils.h"
 #include "core/util/uuid.h"
 #include "mm_service_utils.h"
+#include "prism_dispatcher.h"
 
 namespace xllm {
 namespace {
@@ -651,12 +654,21 @@ void ChatServiceImpl::process_async_impl(std::shared_ptr<ChatCall> call) {
   auto saved_tools = request_params.tools;
   auto saved_streaming = request_params.streaming;
   auto saved_request_id = request_params.request_id;
-
-  master_->handle_request(
-      std::move(messages),
-      std::move(prompt_tokens),
-      std::move(request_params),
-      call.get(),
+  const int32_t request_slo_ms = request_params.slo_ms;
+  const size_t prompt_len = rpc_request.has_routing()
+                                ? static_cast<size_t>(rpc_request.token_ids_size())
+                                : [&rpc_request]() {
+                                    size_t total_len = 0;
+                                    for (const auto& message : rpc_request.messages()) {
+                                      total_len += message.content().size();
+                                      if (message.has_reasoning_content()) {
+                                        total_len += message.reasoning_content().size();
+                                      }
+                                    }
+                                    return total_len;
+                                  }();
+  auto prism_marked = std::make_shared<std::atomic_bool>(false);
+  auto submit_request =
       [call,
        model,
        master = master_,
@@ -669,46 +681,82 @@ void ChatServiceImpl::process_async_impl(std::shared_ptr<ChatCall> call) {
        tool_call_parser_format = tool_call_parser_format_,
        reasoning_parser_format = reasoning_parser_format_,
        is_force_reasoning = is_force_reasoning_,
-       stream_parser =
-           stream_parser](const RequestOutput& req_output) mutable -> bool {
-        if (req_output.status.has_value()) {
-          const auto& status = req_output.status.value();
-          if (!status.ok()) {
-            // Reduce the number of concurrent requests when a
-            // request is finished with error.
-            master->get_rate_limiter()->decrease_one_request();
+       stream_parser = stream_parser,
+       messages = std::move(messages),
+       prompt_tokens = std::move(prompt_tokens),
+       request_params = std::move(request_params),
+       prism_marked]() mutable {
+        master->handle_request(
+            std::move(messages),
+            std::move(prompt_tokens),
+            std::move(request_params),
+            call.get(),
+            [call,
+             model,
+             master,
+             stream,
+             include_usage,
+             first_message_sent = std::move(first_message_sent),
+             request_id,
+             created_time,
+             json_tools,
+             tool_call_parser_format,
+             reasoning_parser_format,
+             is_force_reasoning,
+             stream_parser,
+             prism_marked](const RequestOutput& req_output) mutable -> bool {
+              if (req_output.status.has_value()) {
+                const auto& status = req_output.status.value();
+                if (!status.ok()) {
+                  // Reduce the number of concurrent requests when a
+                  // request is finished with error.
+                  master->get_rate_limiter()->decrease_one_request();
+                  if (FLAGS_enable_prism && !prism_marked->exchange(true)) {
+                    PrismDispatcher::instance().mark_request_finished(model);
+                  }
+                  return call->finish_with_error(status.code(), status.message());
+                }
+              }
 
-            return call->finish_with_error(status.code(), status.message());
-          }
-        }
+              // Reduce the number of concurrent requests when a request
+              // is finished or canceled.
+              if (req_output.finished || req_output.cancelled) {
+                master->get_rate_limiter()->decrease_one_request();
+                if (FLAGS_enable_prism && !prism_marked->exchange(true)) {
+                  PrismDispatcher::instance().mark_request_finished(model);
+                }
+              }
 
-        // Reduce the number of concurrent requests when a request
-        // is finished or canceled.
-        if (req_output.finished || req_output.cancelled) {
-          master->get_rate_limiter()->decrease_one_request();
-        }
+              if (stream) {
+                return send_delta_to_client_brpc(call,
+                                                 include_usage,
+                                                 &first_message_sent,
+                                                 request_id,
+                                                 created_time,
+                                                 model,
+                                                 req_output,
+                                                 stream_parser);
+              } else {
+                return send_result_to_client_brpc(call,
+                                                  request_id,
+                                                  created_time,
+                                                  model,
+                                                  req_output,
+                                                  tool_call_parser_format,
+                                                  reasoning_parser_format,
+                                                  is_force_reasoning,
+                                                  json_tools);
+              }
+            });
+      };
 
-        if (stream) {
-          return send_delta_to_client_brpc(call,
-                                           include_usage,
-                                           &first_message_sent,
-                                           request_id,
-                                           created_time,
-                                           model,
-                                           req_output,
-                                           stream_parser);
-        } else {
-          return send_result_to_client_brpc(call,
-                                            request_id,
-                                            created_time,
-                                            model,
-                                            req_output,
-                                            tool_call_parser_format,
-                                            reasoning_parser_format,
-                                            is_force_reasoning,
-                                            json_tools);
-        }
-      });
+  // Switch point: PRISM uses a global queue + SLO priority + per-model gate.
+  if (FLAGS_enable_prism) {
+    PrismDispatcher::instance().enqueue_request(
+        model, request_slo_ms, prompt_len, std::move(submit_request));
+  } else {
+    submit_request();
+  }
 }
 
 MMChatServiceImpl::MMChatServiceImpl(VLMMaster* master,
