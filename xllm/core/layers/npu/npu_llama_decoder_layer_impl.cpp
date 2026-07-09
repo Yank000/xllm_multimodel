@@ -22,6 +22,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/layers/common/attention_mask.h"
+#include "loader/llama_decoder_loader.h"
 #include "loader/llama_decoder_manual_loader.h"
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
 #include "torch_npu/csrc/core/npu/NPUException.h"
@@ -51,9 +52,14 @@ NpuLlamaDecoderLayerImpl::NpuLlamaDecoderLayerImpl(const ModelContext& context)
   placeholder_ = atb_speed::Utils::AtTensor2Tensor(
       torch::zeros({1}).to(device_).to(dtype_));
 
-  loader_ =
-      std::make_unique<LlamaDecoderManualLoader>(WEIGHT_COUNT_PER_LAYER,
-                                                 context);
+  if (FLAGS_enable_xtensor) {
+    loader_ = std::make_unique<LlamaDecoderManualLoader>(WEIGHT_COUNT_PER_LAYER,
+                                                   context);
+  } else {
+    loader_ =
+        std::make_unique<LlamaDecoderLoader>(WEIGHT_COUNT_PER_LAYER,
+                                                   context);
+  }
   at_placeholder_ = torch::zeros({1}).to(device_).to(dtype_);
 }
 
@@ -74,7 +80,15 @@ void NpuLlamaDecoderLayerImpl::param_from_args(
   param.loraEnableGMM = false;
   param.packQuantType = {1, 1};
   param.linearQuantType = {0, -1, -1, 0, 0, -1, 0};
-  param.linearTransposeType = {1, -1, -1, 1, 1, -1, 1};
+  // XTensor manual loader pre-transposes matmul weights (see
+  // LlamaDecoderManualLoader::merge_host_at_weights), so the linear op must not
+  // transpose again. The non-xtensor BaseLoader path keeps weights untransposed
+  // and relies on the op to transpose.
+  if (FLAGS_enable_xtensor) {
+    param.linearTransposeType = {0, -1, -1, 0, 0, -1, 0};
+  } else {
+    param.linearTransposeType = {1, -1, -1, 1, 1, -1, 1};
+  }
   param.enableKvQuant = false;
   param.quantGroupSize = 0;
   param.normEps = args.rms_norm_eps();

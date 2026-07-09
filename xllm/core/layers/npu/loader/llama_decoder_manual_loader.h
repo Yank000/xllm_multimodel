@@ -31,6 +31,7 @@ class LlamaDecoderManualLoader : public BaseManualLoader {
 
  protected:
   void merge_host_at_weights() override;
+  bool is_nz_format_tensor(int weight_index) override;
 
  private:
   at::Tensor at_placeholder_;

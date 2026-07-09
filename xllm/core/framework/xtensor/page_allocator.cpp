@@ -774,9 +774,9 @@ std::unique_ptr<VirtPage> PageAllocator::alloc_kv_cache_page(
                      << "). Process may exit.";
           throw std::runtime_error("No free physical pages left");
         }
-        LOG(WARNING) << "Not enough physical pages for model=" << model_id
+        /*LOG(WARNING) << "Not enough physical pages for model=" << model_id
                      << " dp_rank=" << dp_rank
-                     << ", prealloc enabled, return nullptr instead of waiting";
+                     << ", prealloc enabled, return nullptr instead of waiting";*/
         return nullptr;
       }
       continue;

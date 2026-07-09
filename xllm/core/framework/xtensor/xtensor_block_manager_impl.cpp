@@ -107,11 +107,11 @@ std::vector<int32_t> XTensorBlockManagerImpl::alloc_internal(size_t need_size) {
 
   //LOG(INFO) << "[KVCache]: allocate " << need_size << " block";
   size_t avail = available_size_internal();
-  if (avail < need_size) {
+  /*if (avail < need_size) {
     LOG(WARNING) << "[XTensorBlockManager] available_size()=" << avail
                  << " < need_size=" << need_size << " model_id=" << model_id_
                  << " dp_rank=" << dp_rank_;
-  }
+  }*/
 
   std::vector<int32_t> ret_index;
   ret_index.reserve(need_size);
@@ -147,7 +147,7 @@ std::vector<int32_t> XTensorBlockManagerImpl::alloc_internal(size_t need_size) {
       lock.lock();
 
       if (new_page == nullptr) {
-        LOG(ERROR) << "Failed to allocate new page for dp_rank=" << dp_rank_;
+        //LOG(ERROR) << "Failed to allocate new page for dp_rank=" << dp_rank_;
         // Return what we have allocated so far (caller should handle partial
         // allocation)
         return ret_index;

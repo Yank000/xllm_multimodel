@@ -157,7 +157,6 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
     }
     if (has_prefill_request) {
       model_->free_atb_buffer();
-      LOG(INFO) << "Prefill batch, free ATB buffer.";
     }
     return std::nullopt;
   }
@@ -224,7 +223,6 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
 
   if (has_prefill_request) {
     model_->free_atb_buffer();
-    LOG(INFO) << "Prefill batch, free ATB buffer.";
   }
 
   return output;

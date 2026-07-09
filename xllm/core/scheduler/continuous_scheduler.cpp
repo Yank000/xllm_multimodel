@@ -500,9 +500,7 @@ void ContinuousScheduler::handle_decode_requests(
         // TO IMPROVE: kv cache offload to cpu
         LOG(WARNING) << "[SCHED_PREEMPT] type=decode_preempt_in_same_queue"
                      << " trigger_request_id=" << request->request_id()
-                     << " victim_request_id=" << request_to_preempt->request_id()
-                     << " kv_utilization="
-                     << kv_cache_manager_->kv_cache_utilization();
+                     << " victim_request_id=" << request_to_preempt->request_id();
         kv_cache_manager_->deallocate(request_to_preempt.get());
         running_queue->pop_back();
         // add preemptable request to waiting priority queue

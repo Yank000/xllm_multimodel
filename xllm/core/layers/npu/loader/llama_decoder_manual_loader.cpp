@@ -137,17 +137,37 @@ void LlamaDecoderManualLoader::merge_host_at_weights() {
       torch::cat({at_host_weight_tensors_[IN_Q_WEIGHT],
                   at_host_weight_tensors_[IN_K_WEIGHT],
                   at_host_weight_tensors_[IN_V_WEIGHT]},
-                 0);
+                 0)
+          .transpose(0, 1)
+          .contiguous();
 
   at_host_weight_tensors_[IN_K_WEIGHT] = at_placeholder_;
   at_host_weight_tensors_[IN_V_WEIGHT] = at_placeholder_;
 
+  at_host_weight_tensors_[IN_ATTENTION_OUT_WEIGHT] =
+      at_host_weight_tensors_[IN_ATTENTION_OUT_WEIGHT]
+          .transpose(0, 1)
+          .contiguous();
+
   at_host_weight_tensors_[IN_MLP_W2_WEIGHT] =
       torch::cat({at_host_weight_tensors_[IN_MLP_W2_WEIGHT],
                   at_host_weight_tensors_[IN_MLP_W1_WEIGHT]},
-                 0);
+                 0)
+          .transpose(0, 1)
+          .contiguous();
 
   at_host_weight_tensors_[IN_MLP_W1_WEIGHT] = at_placeholder_;
+
+  at_host_weight_tensors_[IN_MLP_CPROJ_WEIGHT] =
+      at_host_weight_tensors_[IN_MLP_CPROJ_WEIGHT].transpose(0, 1).contiguous();
+}
+
+bool LlamaDecoderManualLoader::is_nz_format_tensor(int weight_index) {
+  if (weight_index == IN_Q_WEIGHT || weight_index == IN_ATTENTION_OUT_WEIGHT ||
+      weight_index == IN_MLP_W2_WEIGHT || weight_index == IN_MLP_CPROJ_WEIGHT) {
+    return true;
+  }
+  return false;
 }
 
 }  // namespace layer
