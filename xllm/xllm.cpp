@@ -279,7 +279,8 @@ int run() {
       .beam_width(FLAGS_beam_width)
       .kv_cache_dtype(FLAGS_kv_cache_dtype)
       .is_local(is_local)
-      .priority_level(FLAGS_priority_level);
+      .xtensor_min_reserved_pages(FLAGS_xtensor_min_reserved_pages)
+      .xtensor_max_reserved_pages(FLAGS_xtensor_max_reserved_pages);
 
   InstanceName::name()->set_name(options.instance_name().value_or(""));
 

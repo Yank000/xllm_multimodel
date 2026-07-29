@@ -985,42 +985,18 @@ bool LLMEngine::init_model(int32_t master_status) {
     const std::string& model_id = options_.model_id();
 
     LOG(INFO) << "Registering model " << model_id
-              << " with priority_level=" << options_.priority_level();
+              << " with xtensor_min_reserved_pages="
+              << options_.xtensor_min_reserved_pages()
+              << ", xtensor_max_reserved_pages="
+              << options_.xtensor_max_reserved_pages();
 
-    // Determine initial min/max reserved pages based on priority_level
-    int32_t min_pages, max_pages;
-    int32_t priority_level = options_.priority_level();
-    switch (priority_level) {
-      case 1:  // LOW
-        min_pages = 4;
-        max_pages = 16;
-        break;
-      case 2:  // MEDIUM (default)
-        min_pages = 8;
-        max_pages = 32;
-        break;
-      case 3:  // HIGH
-        min_pages = 16;
-        max_pages = 64;
-        break;
-      case 4:  // CRITICAL
-        min_pages = 32;
-        max_pages = 128;
-        break;
-      default:
-        LOG(WARNING) << "Invalid priority_level=" << priority_level
-                     << ", using MEDIUM (2) defaults";
-        min_pages = 8;
-        max_pages = 32;
-        priority_level = 2;
-    }
+    // Reserved pages are configured directly via flags/options.
+    int32_t min_pages = std::max(0, options_.xtensor_min_reserved_pages());
+    int32_t max_pages = std::max(min_pages, options_.xtensor_max_reserved_pages());
 
-    // Use priority_level * 25 as priority value (1->25, 2->50, 3->75, 4->100)
-    int32_t priority = priority_level * 25;
     if (!page_allocator.register_model(model_id,
                                        args_.n_layers(),
                                        master_status,
-                                       priority,
                                        min_pages,
                                        max_pages)) {
       LOG(ERROR) << "Failed to register model " << model_id
@@ -1761,7 +1737,7 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
 
   // wait for the all future to complete
   auto results = folly::collectAll(futures).get();
-
+  
   // End active admission batch when worker futures complete.
   if (engine_forward_admission.has_value()) {
     engine_forward_admission->mark_forward_done();

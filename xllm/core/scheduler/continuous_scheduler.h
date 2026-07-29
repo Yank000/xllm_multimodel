@@ -208,6 +208,11 @@ class ContinuousScheduler : public Scheduler {
   // low.
   std::deque<std::shared_ptr<Request>> preemptable_requests_;
 
+  // records the wall-clock time at which a request was preempted (decode
+  // preemption), keyed by request_id. Used to measure the resume stall time
+  // when the request is scheduled again in handle_prefill_requests.
+  std::unordered_map<std::string, absl::Time> preempt_start_time_;
+
   std::unique_ptr<AsyncResponseProcessor> response_processor_;
 
   std::unique_ptr<ProfileManager> profile_manager_;

@@ -43,7 +43,8 @@ class ArgumentParser:
         self.parser.add_argument('--output_shm_size', type=int, default=128, help='The size of output shared memory in MB.')
         self.parser.add_argument('--kv_cache_dtype', type=str, default='auto', help='KV cache data type. "auto" (default) aligns with model dtype, "int8" enables INT8 quantization (MLU only).')
 
-        self.parser.add_argument('--priority_level', type=int, default=2, help='Priority level for reserved pages allocation (1=LOW, 2=MEDIUM, 3=HIGH, 4=CRITICAL).')
+        self.parser.add_argument('--xtensor_min_reserved_pages', type=int, default=5, help='Minimum number of reserved KV cache pages per model in xtensor mode.')
+        self.parser.add_argument('--xtensor_max_reserved_pages', type=int, default=10, help='Maximum number of reserved KV cache pages per model in xtensor mode.')
         self.parser.add_argument('--enable_dynamic_reserved_pages', action='store_true', help='Enable dynamic adjustment of reserved pages based on utilization.')
     def parse_args(self):
         return self.parser.parse_args()

@@ -52,7 +52,6 @@ class LayerOffloadManager {
 
   struct PerModelState {
     std::string model_id;
-    int32_t priority = 50;
     int32_t num_layers = 0;
     bool is_degraded = false;
     int32_t num_layers_on_device = 0;  // updated after each offload/load
@@ -71,11 +70,8 @@ class LayerOffloadManager {
    *
    * @param model_id   Model identifier (same as used in PageAllocator).
    * @param num_layers Total transformer layers in the model.
-   * @param priority   Priority (higher = restored first / degraded last).
    */
-  void register_model(const std::string& model_id,
-                      int32_t num_layers,
-                      int32_t priority);
+  void register_model(const std::string& model_id, int32_t num_layers);
 
 
   void start();

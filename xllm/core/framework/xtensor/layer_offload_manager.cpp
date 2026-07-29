@@ -65,8 +65,7 @@ void LayerOffloadManager::update_model_copies_delta_locked(
 
 void LayerOffloadManager::register_model(
     const std::string& model_id,
-    int32_t num_layers,
-    int32_t priority) {
+    int32_t num_layers) {
   std::lock_guard<std::mutex> lock(mtx_);
   if (per_model_.count(model_id)) {
     LOG(WARNING) << "[LayerOffloadManager] model " << model_id
@@ -76,12 +75,11 @@ void LayerOffloadManager::register_model(
   state->model_id = model_id;
   state->num_layers = num_layers;
   state->num_layers_on_device = num_layers;  // initially all layers on device
-  state->priority = priority;
   state->is_degraded = false;
   per_model_[model_id] = std::move(state);
   update_model_copies_delta_locked(model_id, +1);
   LOG(INFO) << "[LayerOffloadManager] Registered model=" << model_id
-            << " num_layers=" << num_layers << " priority=" << priority;
+            << " num_layers=" << num_layers;
 }
 
 // ============================================================

@@ -569,11 +569,15 @@ DEFINE_double(kv_prealloc_min_free_ratio,
               "If free_pages_after_prealloc falls below this ratio, "
               "preallocation is skipped.");
 
-DEFINE_int32(priority_level,
-             2,
-             "Priority level for reserved pages allocation. "
-             "1=LOW (min=4, max=16), 2=MEDIUM (min=8, max=32, default), "
-             "3=HIGH (min=16, max=64), 4=CRITICAL (min=32, max=128).");
+DEFINE_int32(xtensor_min_reserved_pages,
+             5,
+             "Minimum number of reserved KV cache pages per model in xtensor "
+             "mode.");
+
+DEFINE_int32(xtensor_max_reserved_pages,
+             10,
+             "Maximum number of reserved KV cache pages per model in xtensor "
+             "mode.");
 
 DEFINE_int32(priority_window_size,
              5000,

@@ -21,6 +21,7 @@ limitations under the License.
 #include <json2pb/pb_to_json.h>
 
 #include <cerrno>
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <nlohmann/json.hpp>
@@ -824,19 +825,20 @@ bool APIService::ParseForkMasterRequest(const proto::MasterInfos* request,
   options.master_node_addr() = request->master_node_addr();
   options.model_path() = request->model_path();
   options.master_status() = request->master_status();
-  // Parse priority_level if provided (defaults to 2 if not set or 0)
-  // In proto3, all fields are optional and default to 0
-  int32_t priority_level = request->priority_level();
-  if (priority_level > 0 && priority_level <= 4) {
-    options.priority_level() = priority_level;
-  } else {
-    // Use default priority_level (MEDIUM = 2) if not provided or invalid
-    options.priority_level() = 2;
-    if (priority_level != 0) {
-      LOG(WARNING) << "Invalid priority_level=" << priority_level
-                   << ", using default 2 (MEDIUM)";
-    }
+  // Reserved KV cache pages for xtensor mode. In proto3, unset int32 fields
+  // default to 0; fall back to the built-in defaults in that case.
+  int32_t min_reserved_pages = request->xtensor_min_reserved_pages();
+  int32_t max_reserved_pages = request->xtensor_max_reserved_pages();
+  if (min_reserved_pages <= 0) {
+    min_reserved_pages = 5;
   }
+  if (max_reserved_pages <= 0) {
+    max_reserved_pages = 10;
+  }
+  options.xtensor_min_reserved_pages() =
+      std::min(min_reserved_pages, max_reserved_pages);
+  options.xtensor_max_reserved_pages() =
+      std::max(min_reserved_pages, max_reserved_pages);
 
   // Parse nnodes and dp_size (tp_size = nnodes / dp_size, computed by engine)
   if (request->nnodes() > 0) {

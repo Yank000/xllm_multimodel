@@ -272,7 +272,9 @@ DECLARE_bool(use_audio_in_video);
 DECLARE_bool(enable_dynamic_reserved_pages);
 DECLARE_double(kv_prealloc_min_free_ratio);
 
-DECLARE_int32(priority_level);
+DECLARE_int32(xtensor_min_reserved_pages);
+
+DECLARE_int32(xtensor_max_reserved_pages);
 
 DECLARE_int32(priority_window_size);
 

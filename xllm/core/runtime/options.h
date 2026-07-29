@@ -169,9 +169,9 @@ struct Options {
   // Layer wise H2D copy batchs
   PROPERTY(uint32_t, layers_wise_copy_batchs) = 4;
 
-  // Priority level for reserved pages allocation (1=low, 2=MEDIUM, 3=HIGH,
-  // 4=CRITICAL)
-  PROPERTY(int32_t, priority_level) = 2;
+  // Min/max reserved KV cache pages per model in xtensor mode.
+  PROPERTY(int32_t, xtensor_min_reserved_pages) = 5;
+  PROPERTY(int32_t, xtensor_max_reserved_pages) = 10;
 
   // dit
   // max requests per batch

@@ -47,7 +47,8 @@ class LLM:
         is_local: bool = True,
         input_shm_size: int = 1024,
         output_shm_size: int = 128,
-        priority_level: int = 2,
+        xtensor_min_reserved_pages: int = 5,
+        xtensor_max_reserved_pages: int = 10,
         enable_dynamic_reserved_pages: bool = False,
         **kwargs,
     ) -> None:
@@ -105,7 +106,8 @@ class LLM:
         options.is_local = is_local
         options.input_shm_size = input_shm_size
         options.output_shm_size = output_shm_size
-        options.priority_level = priority_level
+        options.xtensor_min_reserved_pages = xtensor_min_reserved_pages
+        options.xtensor_max_reserved_pages = xtensor_max_reserved_pages
         # enable_dynamic_reserved_pages is set via FLAGS_enable_dynamic_reserved_pages
         if enable_dynamic_reserved_pages:
             import os

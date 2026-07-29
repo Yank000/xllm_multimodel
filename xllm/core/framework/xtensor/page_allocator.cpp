@@ -174,11 +174,10 @@ size_t PageAllocator::get_worker_used_pages_locked(int32_t worker_rank) const {
 bool PageAllocator::register_model(const std::string& model_id,
                                    int64_t num_layers,
                                    int32_t master_status,
-                                   int32_t priority,
                                    int32_t min_reserved_pages,
                                    int32_t max_reserved_pages) {
   LOG(INFO) << "[PageAllocator] Starting register_model for " << model_id
-            << ", num_layers=" << num_layers << ", priority=" << priority
+            << ", num_layers=" << num_layers
             << ", min_reserved_pages=" << min_reserved_pages
             << ", max_reserved_pages=" << max_reserved_pages;
   std::lock_guard<std::mutex> lock(mtx_);
@@ -212,8 +211,7 @@ bool PageAllocator::register_model(const std::string& model_id,
             << " (num_total_phy_pages_=" << num_total_phy_pages_
             << ", num_layers=" << num_layers << ")";
 
-  // Initialize priority and reserved pages configuration
-  state.priority = priority;
+  // Initialize reserved pages configuration
   state.min_reserved_pages = min_reserved_pages;
   state.max_reserved_pages = max_reserved_pages;
   state.base_min_reserved_pages = min_reserved_pages;
@@ -244,13 +242,12 @@ bool PageAllocator::register_model(const std::string& model_id,
             << model_states_[model_id].num_total_virt_pages
             << ", phy_pages_per_virt_page="
             << model_states_[model_id].phy_pages_per_virt_page
-            << ", priority=" << priority
             << ", min_reserved_pages=" << min_reserved_pages
             << ", max_reserved_pages=" << max_reserved_pages;
 
   if (layer_offload_mgr_) {
-    layer_offload_mgr_->register_model(
-        model_id, static_cast<int32_t>(num_layers), priority);
+    layer_offload_mgr_->register_model(model_id,
+                                       static_cast<int32_t>(num_layers));
   }
 
   return true;
@@ -1291,7 +1288,7 @@ void PageAllocator::update_model_reserved_pages(const std::string& model_id,
     LOG(INFO) << "[PriorityAlloc] Model " << model_id
               << " reserved pages updated: "
               << "min=" << old_min << "->" << new_min << ", max=" << old_max
-              << "->" << new_max << ", priority=" << it->second.priority;
+              << "->" << new_max;
   }
 }
 

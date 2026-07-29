@@ -217,9 +217,9 @@ class Options {
   PROPERTY(std::string, kv_cache_dtype) = "auto";
   PROPERTY(int32_t, master_status) = 0;
   
-  // Priority level for reserved pages allocation (1=low, 2=MEDIUM, 3=HIGH,
-  // 4=CRITICAL)
-  PROPERTY(int32_t, priority_level) = 2;
+  // Min/max reserved KV cache pages per model in xtensor mode.
+  PROPERTY(int32_t, xtensor_min_reserved_pages) = 5;
+  PROPERTY(int32_t, xtensor_max_reserved_pages) = 10;
 };
 
 }  // namespace xllm
