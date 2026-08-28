@@ -137,6 +137,13 @@ class PrefixCache {
 
     // model ID (used for global LRU mode)
     std::string model_id;
+
+    // Set true (under GlobalPrefixCacheManager::mutex_) the moment this node is
+    // pulled out of global_lru_list_ for deletion. Once set, on_node_accessed /
+    // on_node_created must refuse to reinsert it, otherwise a concurrent match()
+    // on cache_mutex_ could resurrect a pointer that the evictor is about to
+    // delete, leaving a dangling entry in global_lru_list_ (use-after-free).
+    std::atomic<bool> evicting{false};
   };
 
   struct DNodeList {

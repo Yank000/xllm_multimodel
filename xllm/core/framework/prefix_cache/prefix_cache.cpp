@@ -118,6 +118,12 @@ std::vector<Block> PrefixCache::match(
 
     auto iter = cached_blocks_.find(token_hash_key);
     if (iter != cached_blocks_.end()) {
+      // A node marked for eviction is about to be deleted by the evictor. Stop
+      // extending the prefix here (treat as a miss) so we neither hand out nor
+      // ref-bump a block that is being torn down; remaining blocks recompute.
+      if (iter->second->evicting.load(std::memory_order_acquire)) {
+        break;
+      }
       blocks.push_back(iter->second->block);
       if (!enable_global_lru_) {
         lru_lst_.remove_node(iter->second);

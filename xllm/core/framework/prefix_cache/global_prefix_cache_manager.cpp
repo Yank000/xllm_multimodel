@@ -51,6 +51,13 @@ void GlobalPrefixCacheManager::unregister_cache(const std::string& model_id) {
 void GlobalPrefixCacheManager::on_node_accessed(Node* node) {
   std::lock_guard<std::mutex> lock(mutex_);
 
+  // A node already pulled out for eviction must not be resurrected: the evictor
+  // released mutex_ and is about to delete it. Reinserting here would leave a
+  // dangling pointer in global_lru_list_ (use-after-free on the next traversal).
+  if (node->evicting.load(std::memory_order_acquire)) {
+    return;
+  }
+
   // Remove from current position and move to front (MRU)
   global_lru_list_.remove(node);
   global_lru_list_.push_front(node);
@@ -59,6 +66,10 @@ void GlobalPrefixCacheManager::on_node_accessed(Node* node) {
 
 void GlobalPrefixCacheManager::on_node_created(Node* node) {
   std::lock_guard<std::mutex> lock(mutex_);
+
+  if (node->evicting.load(std::memory_order_acquire)) {
+    return;
+  }
 
   // Insert new node at front (MRU)
   global_lru_list_.push_front(node);
@@ -103,6 +114,9 @@ size_t GlobalPrefixCacheManager::evict_for_model(
         LOG(INFO) << "Evicted block: block_id=" << node->block.id()
                   << ", last_access_time=" << node->last_access_time;
 
+        // Mark before releasing mutex_ so a concurrent match()/insert() cannot
+        // reinsert this node into global_lru_list_ while we delete it below.
+        node->evicting.store(true, std::memory_order_release);
         auto forward_it = std::next(it).base();
         it = decltype(it)(global_lru_list_.erase(forward_it));
         evicted_count++;
@@ -181,6 +195,9 @@ size_t GlobalPrefixCacheManager::evict_global_pure_lru(
           evicted_keys_by_cache[source_cache].push_back(key);
         }
 
+        // Mark before releasing mutex_ so a concurrent match()/insert() cannot
+        // reinsert this node into global_lru_list_ while we delete it below.
+        node->evicting.store(true, std::memory_order_release);
         auto forward_it = std::next(it).base();
         it = decltype(it)(global_lru_list_.erase(forward_it));
 
